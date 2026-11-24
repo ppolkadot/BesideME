@@ -1,0 +1,75 @@
+[package]
+name = "manga-watcher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Lightweight manga chapter watcher with Discord webhook notifications"
+license = "MIT"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+opt-level = "s"
+
+[[bin]]
+name = "manga-watcher"
+path = "src/main.rs"
+
+[[bin]]
+name = "MangaWatcher"
+path = "src/bin/gui/main.rs"
+required-features = ["gui"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+dotenvy = "0.15"
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "accesskit", "clipboard", "links", "x11", "wayland"], optional = true }
+egui_extras = { version = "0.37", features = ["http", "image"], optional = true }
+fastrand = "2"
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"], optional = true }
+regex-lite = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "signal", "time"] }
+toml = "0.8"
+toml_edit = "0.25"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+wiremock = "0.6"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[features]
+default = ["gui"]
+# Desktop app (MangaWatcher.exe). Build without it on servers: --no-default-features
+gui = ["dep:eframe", "dep:egui_extras", "dep:image"]
+
+# Keep debug builds small (the GUI dependency tree is large).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

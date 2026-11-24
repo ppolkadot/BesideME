@@ -1,0 +1,11 @@
+# Manga Watcher settings. Webhook URLs are NOT stored here: they live in the `.env` file
+# next to this one. Add or remove manga with the Manga Watcher app (or by hand below).
+
+interval_minutes = 30          # how often to check (minimum 10)
+jitter_seconds = 120           # random +/- seconds so checks don't run in lockstep
+timeout_seconds = 20
+user_agent = "manga-watcher/0.1 (+personal use)"
+require_published = false      # true = skip early-access chapters until they get a release date
+max_messages_per_cycle = 3     # max chapter messages per manga per check
+alert_after_failures = 6       # health alert after N failed checks in a row; 0 = off
+mention = "@everyone"          # ping added to chapter announcements; "" = no ping

@@ -1,0 +1,20 @@
+# Global defaults; per-series values override.
+# Note: config.toml contains NO secrets. Put webhook URLs in .env (see .env.example).
+interval_minutes = 30          # minimum 10 (clamped, with a warning)
+jitter_seconds = 120           # uniform random in [-jitter, +jitter]
+timeout_seconds = 20
+user_agent = "manga-watcher/0.1 (+personal use)"
+require_published = false      # announce early-access (undated) chapters too
+max_messages_per_cycle = 3     # max chapter-group messages per series per cycle
+alert_after_failures = 6       # health alert after N consecutive failures; 0 = off
+mention = "@everyone"          # message content for chapter announcements; "" = no ping
+# thread_id = "123"            # optional: post into a thread / forum post
+
+[[series]]
+url = "https://global.manga-up.com/manga/261"
+# site = "mangaup"             # optional; if given, must match the site resolved from url
+# label = "Smoking Behind the Supermarket with You"  # optional display override for the manga title
+# webhook_env = "MANGA_WATCHER_WEBHOOK_SMOKING"      # optional: NAME of an env var to use instead
+# thread_id = "..."            # optional per-series override
+# interval_minutes = 15        # optional per-series override (still >= 10)
+# require_published = true     # optional per-series override
