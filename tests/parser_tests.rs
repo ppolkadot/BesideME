@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 
 use reqwest::Url;
 
-use manga_watcher::model::{ChapterRef, SeriesSnapshot};
-use manga_watcher::sites::{MangaUp, ParseError, Registry, Site};
+use besideme::model::{ChapterRef, SeriesSnapshot};
+use besideme::sites::{MangaUp, ParseError, Registry, Site};
 
 const FIXTURE_BASE: &str = include_str!("fixtures/manga261_base.html");
 const FIXTURE_NEW: &str = include_str!("fixtures/manga261_new.html");
@@ -291,7 +291,7 @@ fn custom_stub_site_integrates_with_registry_and_parses_fixture() {
 
 #[test]
 fn parses_search_page_catalog_and_skips_bad_entries() {
-    use manga_watcher::sites::search_catalog;
+    use besideme::sites::search_catalog;
     let site = MangaUp::default();
     let html = r#"<html><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"data":{"genres":[],"titles":[
         {"titleId":261,"titleName":"Smoking Behind the Supermarket with You","imageUrl":"/asset/a/en/manga_list/261.webp?h=x","lastUpdated":"Nov 21, 2026"},

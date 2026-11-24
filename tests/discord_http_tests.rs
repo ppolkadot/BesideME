@@ -9,11 +9,11 @@ use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use manga_watcher::config::WebhookUrl;
-use manga_watcher::detect::ChapterGroup;
-use manga_watcher::http::{FetchOutcome, HttpError, MAX_RESPONSE_BYTES, SiteHttpClient};
-use manga_watcher::model::ChapterRef;
-use manga_watcher::notify::discord::{
+use besideme::config::WebhookUrl;
+use besideme::detect::ChapterGroup;
+use besideme::http::{FetchOutcome, HttpError, MAX_RESPONSE_BYTES, SiteHttpClient};
+use besideme::model::ChapterRef;
+use besideme::notify::discord::{
     AnnouncementContext, DiscordClient, DiscordError, build_announcement_payload,
     build_health_alert_payload, build_test_webhook_payload, escape_discord_markdown,
     truncate_chars,
@@ -59,7 +59,7 @@ fn golden_json_for_multipart_early_access_folded_and_no_subtitle() {
     let payload = build_announcement_payload(&group, &ctx);
     let val: Value = serde_json::to_value(&payload).expect("serialize payload");
 
-    assert_eq!(val["username"], "Manga Watcher");
+    assert_eq!(val["username"], "Yamada");
     assert_eq!(
         val["content"],
         "@everyone New chapter 67 (3 parts) of **Smoking Behind the Supermarket with You**"
@@ -168,7 +168,8 @@ fn site_text_mentions_are_neutralized_and_markdown_escaped() {
     assert!(health.content.is_none());
     assert!(health.allowed_mentions.parse.is_empty());
 
-    let test_pl = build_test_webhook_payload("Test @everyone", "2026-11-23T12:00:00Z");
+    let test_pl = build_test_webhook_payload("Test @everyone", "2026-11-23T12:00:00Z", true);
+    assert_eq!(test_pl.username, "Sasaki");
     assert!(test_pl.content.is_none());
     assert!(test_pl.allowed_mentions.parse.is_empty());
 
@@ -187,12 +188,13 @@ fn multibyte_char_truncation_never_panics_and_respects_char_count() {
 #[tokio::test]
 async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx() {
     let server = MockServer::start().await;
-    let client = DiscordClient::new("manga-watcher-test/0.1", Duration::from_secs(5)).unwrap();
-    let payload = build_test_webhook_payload("unit test", "2026-11-23T12:00:00Z");
+    let client = DiscordClient::new("BesideME-test/0.1", Duration::from_secs(5)).unwrap();
+    let payload = build_test_webhook_payload("unit test", "2026-11-23T12:00:00Z", false);
+    assert_eq!(payload.username, "Yamada");
 
     // 1. 429 with retry_after: 0.1 -> retries once and succeeds
     let wh_retry = WebhookUrl::parse(
-        "MANGA_WATCHER_WEBHOOK",
+        "BESIDEME_WEBHOOK",
         &format!("{}/api/webhooks/111111/token_retry", server.uri()),
         true,
     )
@@ -221,7 +223,7 @@ async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx
 
     // 2. 429 with retry_after: 120.0 -> gives up immediately without retry
     let wh_long_429 = WebhookUrl::parse(
-        "MANGA_WATCHER_WEBHOOK",
+        "BESIDEME_WEBHOOK",
         &format!("{}/api/webhooks/222222/token_long429", server.uri()),
         true,
     )
@@ -239,7 +241,7 @@ async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx
 
     // 3. 404 -> WebhookGone
     let wh_404 = WebhookUrl::parse(
-        "MANGA_WATCHER_WEBHOOK",
+        "BESIDEME_WEBHOOK",
         &format!("{}/api/webhooks/333333/token_404", server.uri()),
         true,
     )
@@ -257,7 +259,7 @@ async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx
 
     // 4. 400 -> WebhookRejected
     let wh_400 = WebhookUrl::parse(
-        "MANGA_WATCHER_WEBHOOK",
+        "BESIDEME_WEBHOOK",
         &format!("{}/api/webhooks/444444/token_400", server.uri()),
         true,
     )
@@ -280,7 +282,7 @@ async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx
 #[tokio::test]
 async fn site_http_client_enforces_ua_etag_timeout_redirects_and_5mb_size_cap() {
     let server = MockServer::start().await;
-    let ua = "manga-watcher/0.1 (+personal use)";
+    let ua = "BesideME/0.1 (+personal use)";
     let client = SiteHttpClient::new(ua, Duration::from_millis(400)).unwrap();
 
     // 1. Sends User-Agent and returns ETag, then sends If-None-Match and handles 304

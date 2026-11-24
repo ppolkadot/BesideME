@@ -28,7 +28,7 @@ pub const WATCH_MAX_SLEEP_SLICE: Duration = Duration::from_secs(60);
 /// Maximum backoff cap for consecutive 403/429 blocks (6 hours, §7).
 pub const MAX_BLOCK_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Exit codes returned by `manga-watcher`, ordered by severity ("worst wins", §6).
+/// Exit codes returned by `besideme-cli`, ordered by severity ("worst wins", §6).
 ///
 /// Priority: `1` config/state error > `5` another instance running > `4` webhook error
 /// > `2` parse error > `3` network error > `10` news announced > `0` ok.
@@ -191,7 +191,7 @@ pub fn compute_next_delay(
     }
 }
 
-/// Runs a single sequential check pass over all configured series (`manga-watcher check`).
+/// Runs a single sequential check pass over all configured series (`besideme-cli check`).
 pub async fn run_check(
     config: &Config,
     registry: &Registry,
@@ -233,7 +233,7 @@ pub async fn run_check(
 
     if config.health_webhook.is_none() && config.alert_after_failures > 0 {
         tracing::warn!(
-            "MANGA_WATCHER_HEALTH_WEBHOOK is not set; operational health alerts are disabled"
+            "BESIDEME_HEALTH_WEBHOOK is not set; operational health alerts are disabled"
         );
     }
 
@@ -1051,7 +1051,7 @@ async fn record_series_failure(
                         tracing::error!(
                             series = %state_key,
                             error = %err,
-                            "failed to deliver health alert to MANGA_WATCHER_HEALTH_WEBHOOK"
+                            "failed to deliver health alert to BESIDEME_HEALTH_WEBHOOK"
                         );
                     }
                 }
@@ -1060,7 +1060,7 @@ async fn record_series_failure(
             tracing::warn!(
                 series = %state_key,
                 consecutive_failures = streak,
-                "series reached alert_after_failures threshold, but MANGA_WATCHER_HEALTH_WEBHOOK is not set"
+                "series reached alert_after_failures threshold, but BESIDEME_HEALTH_WEBHOOK is not set"
             );
         }
     }
@@ -1123,7 +1123,7 @@ async fn handle_recovery_if_needed(
         } else {
             tracing::info!(
                 series = %state_key,
-                "watcher recovered after previous failure streak (MANGA_WATCHER_HEALTH_WEBHOOK unset)"
+                "watcher recovered after previous failure streak (BESIDEME_HEALTH_WEBHOOK unset)"
             );
         }
     }
@@ -1138,7 +1138,7 @@ async fn send_webhook_gone_health_alert(
     let Some(ref health_wh) = config.health_webhook else {
         tracing::warn!(
             title = %display_title,
-            "announcement webhook returned WebhookGone, and MANGA_WATCHER_HEALTH_WEBHOOK is not configured"
+            "announcement webhook returned WebhookGone, and BESIDEME_HEALTH_WEBHOOK is not configured"
         );
         return;
     };
@@ -1195,7 +1195,7 @@ pub fn format_relative_time(last_success_unix: Option<i64>, now_unix: i64) -> St
     }
 }
 
-/// Runs the long-lived polling loop (`manga-watcher watch`, §7).
+/// Runs the long-lived polling loop (`besideme-cli watch`, §7).
 #[allow(clippy::too_many_lines)]
 pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) -> ExitCode {
     let _lock = match InstanceLock::acquire_for_state(state_path) {
@@ -1220,7 +1220,7 @@ pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) 
 
     if config.health_webhook.is_none() && config.alert_after_failures > 0 {
         tracing::warn!(
-            "MANGA_WATCHER_HEALTH_WEBHOOK is not set; operational health alerts are disabled"
+            "BESIDEME_HEALTH_WEBHOOK is not set; operational health alerts are disabled"
         );
     }
 
@@ -1346,7 +1346,7 @@ async fn shutdown_signal() {
     }
 }
 
-/// Sends a test embed via the configured announcement or health webhook (`manga-watcher test-webhook`).
+/// Sends a test embed via the configured announcement or health webhook (`besideme-cli test-webhook`).
 pub async fn run_test_webhook(
     config: &Config,
     series_url_filter: Option<&str>,
@@ -1360,14 +1360,14 @@ pub async fn run_test_webhook(
     if test_health {
         let Some(ref health_wh) = config.health_webhook else {
             tracing::error!(
-                "cannot test health webhook: MANGA_WATCHER_HEALTH_WEBHOOK is not set in .env"
+                "cannot test health webhook: BESIDEME_HEALTH_WEBHOOK is not set in .env"
             );
             return ExitCode::ConfigOrStateError;
         };
-        let payload = build_test_webhook_payload("health alert channel", &timestamp);
+        let payload = build_test_webhook_payload("health alert channel", &timestamp, true);
         return match discord_client.send(health_wh, None, &payload).await {
             Ok(()) => {
-                println!("Successfully delivered test message to MANGA_WATCHER_HEALTH_WEBHOOK.");
+                println!("Successfully delivered test message to BESIDEME_HEALTH_WEBHOOK.");
                 ExitCode::Ok
             }
             Err(err) => {
@@ -1398,7 +1398,7 @@ pub async fn run_test_webhook(
             return ExitCode::ConfigOrStateError;
         };
         let label = format!("series {}", series_cfg.key);
-        let payload = build_test_webhook_payload(&label, &timestamp);
+        let payload = build_test_webhook_payload(&label, &timestamp, false);
         return match discord_client
             .send(wh, series_cfg.thread_id.as_deref(), &payload)
             .await
@@ -1429,7 +1429,7 @@ pub async fn run_test_webhook(
             tokio::time::sleep(GROUP_POST_GAP).await;
         }
         let label = format!("announcement webhook #{}", idx + 1);
-        let payload = build_test_webhook_payload(&label, &timestamp);
+        let payload = build_test_webhook_payload(&label, &timestamp, false);
         match discord_client.send(wh, *thread_id, &payload).await {
             Ok(()) => {
                 println!("Successfully delivered test message to {label}.");
@@ -1443,7 +1443,7 @@ pub async fn run_test_webhook(
     code
 }
 
-/// Prints the status of configured series and orphaned state entries (`manga-watcher list`, §6).
+/// Prints the status of configured series and orphaned state entries (`besideme-cli list`, §6).
 pub async fn run_list(
     config: &Config,
     registry: &Registry,
@@ -1542,7 +1542,7 @@ pub async fn run_list(
     exit_code
 }
 
-/// Removes one or all series state entries so the next run re-baselines (`manga-watcher reset`, §6).
+/// Removes one or all series state entries so the next run re-baselines (`besideme-cli reset`, §6).
 pub fn run_reset(
     state_path: &Path,
     registry: &Registry,

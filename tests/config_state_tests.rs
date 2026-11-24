@@ -7,16 +7,16 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt;
 
-use manga_watcher::config::{
+use besideme::config::{
     Config, ConfigError, DEFAULT_WEBHOOK_ENV, HEALTH_WEBHOOK_ENV, LoadOptions, REDACTED_WEBHOOK,
     WebhookUrl,
 };
-use manga_watcher::paths::{
+use besideme::paths::{
     lock_path_for_state, resolve_config_path_with_dirs, resolve_config_path_with_exe_dir,
     resolve_env_file_path_with_cwd,
 };
-use manga_watcher::sites::Registry;
-use manga_watcher::state::{
+use besideme::sites::Registry;
+use besideme::state::{
     InstanceLock, MAX_ANNOUNCED_IDS, STATE_VERSION, SeriesState, StateError, StateFile,
 };
 
@@ -30,7 +30,7 @@ fn path_resolution_precedence_works() {
     let tmp = TempDir::new().expect("tempdir");
     let explicit_cfg = tmp.path().join("explicit.toml");
     let user_cfg_dir = tmp.path().join("appdata");
-    let user_cfg = user_cfg_dir.join("manga-watcher").join("config.toml");
+    let user_cfg = user_cfg_dir.join("BesideME").join("config.toml");
     let cwd_dir = tmp.path().join("cwd");
     let cwd_cfg = cwd_dir.join("config.toml");
 
@@ -46,7 +46,7 @@ fn path_resolution_precedence_works() {
     let resolved = resolve_config_path_with_dirs(None, Some(&user_cfg_dir), &cwd_dir).unwrap();
     assert_eq!(resolved, cwd_cfg);
 
-    // Create dirs::config_dir()/manga-watcher/config.toml -> overrides ./config.toml
+    // Create dirs::config_dir()/BesideME/config.toml -> overrides ./config.toml
     fs::write(&user_cfg, "# user").expect("write");
     let resolved = resolve_config_path_with_dirs(None, Some(&user_cfg_dir), &cwd_dir).unwrap();
     assert_eq!(resolved, user_cfg);
@@ -83,7 +83,7 @@ fn config_next_to_executable_wins_over_cwd_but_not_appdata() {
     assert_eq!(resolved, exe_cfg);
 
     // %APPDATA% config still takes precedence.
-    let user_cfg = user_cfg_dir.join("manga-watcher").join("config.toml");
+    let user_cfg = user_cfg_dir.join("BesideME").join("config.toml");
     fs::create_dir_all(user_cfg.parent().expect("parent")).expect("mkdir");
     fs::write(&user_cfg, "# user").expect("write");
     let resolved =
@@ -260,7 +260,7 @@ fn env_loading_and_per_series_webhook_override_works() {
     fs::write(
         &env_path,
         format!(
-            "{DEFAULT_WEBHOOK_ENV}={VALID_WEBHOOK}\n{HEALTH_WEBHOOK_ENV}={VALID_HEALTH_WEBHOOK}\nMANGA_WATCHER_WEBHOOK_SMOKING={custom_wh}\n"
+            "{DEFAULT_WEBHOOK_ENV}={VALID_WEBHOOK}\n{HEALTH_WEBHOOK_ENV}={VALID_HEALTH_WEBHOOK}\nBESIDEME_WEBHOOK_SMOKING={custom_wh}\n"
         ),
     )
     .expect("write .env");
@@ -270,7 +270,7 @@ fn env_loading_and_per_series_webhook_override_works() {
         r#"
         [[series]]
         url = "https://global.manga-up.com/manga/261"
-        webhook_env = "MANGA_WATCHER_WEBHOOK_SMOKING"
+        webhook_env = "BESIDEME_WEBHOOK_SMOKING"
         "#,
     )
     .expect("write config.toml");
@@ -288,15 +288,15 @@ fn env_loading_and_per_series_webhook_override_works() {
     .expect("load config from disk");
 
     assert!(cfg.health_webhook.is_some());
-    assert_eq!(cfg.series[0].webhook_env, "MANGA_WATCHER_WEBHOOK_SMOKING");
+    assert_eq!(cfg.series[0].webhook_env, "BESIDEME_WEBHOOK_SMOKING");
     assert!(cfg.series[0].webhook.is_some());
 
     // Verify real process environment precedence over .env values
-    let dotenv_map = manga_watcher::config::parse_dotenv_file(&env_path).expect("parse dotenv");
+    let dotenv_map = besideme::config::parse_dotenv_file(&env_path).expect("parse dotenv");
     let override_wh = "https://canary.discord.com/api/webhooks/777777777/override_from_real_env";
     let mut simulated_real_env = BTreeMap::new();
     simulated_real_env.insert(
-        "MANGA_WATCHER_WEBHOOK_SMOKING".to_string(),
+        "BESIDEME_WEBHOOK_SMOKING".to_string(),
         override_wh.to_string(),
     );
 
@@ -304,7 +304,7 @@ fn env_loading_and_per_series_webhook_override_works() {
         r#"
         [[series]]
         url = "https://global.manga-up.com/manga/261"
-        webhook_env = "MANGA_WATCHER_WEBHOOK_SMOKING"
+        webhook_env = "BESIDEME_WEBHOOK_SMOKING"
         "#,
         &LoadOptions::default(),
         &registry,
@@ -317,8 +317,7 @@ fn env_loading_and_per_series_webhook_override_works() {
     )
     .expect("overridden config");
 
-    let expected_url =
-        WebhookUrl::parse("MANGA_WATCHER_WEBHOOK_SMOKING", override_wh, false).unwrap();
+    let expected_url = WebhookUrl::parse("BESIDEME_WEBHOOK_SMOKING", override_wh, false).unwrap();
     assert_eq!(
         cfg_overridden.series[0].webhook.as_ref(),
         Some(&expected_url)

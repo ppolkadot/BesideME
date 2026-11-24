@@ -1,5 +1,5 @@
-# Builds the release binaries and the Manga Watcher setup wizard.
-# Output: dist\MangaWatcher-Setup-<version>.exe
+# Builds the release binaries and the BesideME setup wizard.
+# Output: dist\BesideME-Setup-<version>.exe
 # Requires Inno Setup 6.7+ (winget install JRSoftware.InnoSetup).
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -18,9 +18,9 @@ try {
     ) | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $iscc) { throw "Inno Setup 6 not found. Install it with: winget install JRSoftware.InnoSetup" }
 
-    & $iscc "/DAppVersion=$version" "installer\MangaWatcher.iss"
+    & $iscc "/DAppVersion=$version" "installer\BesideME.iss"
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compile failed" }
-    Write-Host "Installer: $root\dist\MangaWatcher-Setup-$version.exe"
+    Write-Host "Installer: $root\dist\BesideME-Setup-$version.exe"
 }
 finally {
     Pop-Location

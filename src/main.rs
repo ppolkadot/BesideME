@@ -1,4 +1,4 @@
-//! CLI entry point for `manga-watcher`.
+//! CLI entry point for `besideme-cli`.
 
 use std::path::PathBuf;
 use std::process;
@@ -10,16 +10,16 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use manga_watcher::config::{Config, LoadOptions};
-use manga_watcher::paths::{resolve_log_dir, resolve_state_path};
-use manga_watcher::sites::Registry;
-use manga_watcher::watcher::{
+use besideme::config::{Config, LoadOptions};
+use besideme::paths::{resolve_log_dir, resolve_state_path};
+use besideme::sites::Registry;
+use besideme::watcher::{
     CheckOptions, ExitCode, run_check, run_list, run_reset, run_test_webhook, run_watch,
 };
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "manga-watcher",
+    name = "besideme-cli",
     version,
     about = "Lightweight manga chapter watcher with Discord webhook notifications"
 )]
@@ -102,7 +102,7 @@ struct TestWebhookArgs {
     #[arg(long = "series", value_name = "URL")]
     series: Option<String>,
 
-    /// Test `MANGA_WATCHER_HEALTH_WEBHOOK` instead of announcement webhooks.
+    /// Test `BESIDEME_HEALTH_WEBHOOK` instead of announcement webhooks.
     #[arg(long = "health")]
     health: bool,
 }
@@ -164,7 +164,7 @@ fn init_tracing(verbose: bool, quiet: bool) {
         std::fs::create_dir_all(&log_dir).ok()?;
         let appender = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
-            .filename_prefix("manga-watcher")
+            .filename_prefix("besideme")
             .filename_suffix("log")
             .max_log_files(7)
             .build(log_dir)

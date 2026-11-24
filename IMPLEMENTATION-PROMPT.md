@@ -1,4 +1,7 @@
-# Implementation Prompt — Manga Chapter Watcher (Rust, Discord webhook) — rev 2
+# BesideME Implementation Prompt
+
+This document describes the original chapter-checking architecture. See [README.md](README.md)
+for the current desktop setup and [the redesign proposal](docs/redesign-plan.md) for the next release.
 
 ## 0. What you are building
 
@@ -44,7 +47,7 @@ Non-goals:
 
 `GET https://global.manga-up.com/manga/261` returns HTTP 200 and a Next.js SSR document of
 about 330 KB, or about 26 KB with gzip. **It needs no cookies, no JS execution and no
-login.** The descriptive UA `manga-watcher/0.1 (+personal use)` gets the same full
+login.** The descriptive UA `BesideME/0.1 (+personal use)` gets the same full
 response as a browser UA, so there is no need to imitate a browser.
 
 Response headers: `Cache-Control: s-maxage=30, stale-while-revalidate=…`,
@@ -177,11 +180,11 @@ with an optional trailing slash and the query string ignored. Anything else retu
 
 ## 3. Config
 
-Path resolution order (use the `dirs` crate and append `manga-watcher`):
+Path resolution order (use the `dirs` crate and append `BesideME`):
 
 1. `--config <path>`
-2. `dirs::config_dir()/manga-watcher/config.toml`. On Windows this is
-   `%APPDATA%\manga-watcher\config.toml`, on Linux `~/.config/manga-watcher/config.toml`.
+2. `dirs::config_dir()/BesideME/config.toml`. On Windows this is
+   `%APPDATA%\BesideME\config.toml`, on Linux `~/.config/BesideME/config.toml`.
 3. `./config.toml`
 
 ```toml
@@ -189,7 +192,7 @@ Path resolution order (use the `dirs` crate and append `manga-watcher`):
 interval_minutes = 30          # minimum 10 (clamped, with a warning)
 jitter_seconds = 120           # uniform random in [-jitter, +jitter]
 timeout_seconds = 20
-user_agent = "manga-watcher/0.1 (+personal use)"
+user_agent = "BesideME/0.1 (+personal use)"
 require_published = false      # announce early-access (undated) chapters too
 max_messages_per_cycle = 3     # max chapter-group messages per series per cycle, see §4.3
 alert_after_failures = 6       # health alert after N consecutive failures; 0 = off
@@ -200,7 +203,7 @@ mention = "@everyone"          # message content for chapter announcements; "" =
 url = "https://global.manga-up.com/manga/261"
 # site = "mangaup"             # optional; if given, must match the site resolved from url
 # label = "Smoking..."         # optional display override for the manga title
-# webhook_env = "MANGA_WATCHER_WEBHOOK_SMOKING"  # optional: NAME of an env var to use instead
+# webhook_env = "BESIDEME_WEBHOOK_SMOKING"  # optional: NAME of an env var to use instead
 # thread_id = "..."            # optional per-series override
 # interval_minutes = 15        # optional per-series override (still >= 10)
 # require_published = true     # optional per-series override
@@ -211,8 +214,8 @@ environment, normally loaded from a `.env` file:
 
 ```dotenv
 # .env  — gitignored, never committed
-MANGA_WATCHER_WEBHOOK=https://discord.com/api/webhooks/<id>/<token>          # chapter announcements (required)
-MANGA_WATCHER_HEALTH_WEBHOOK=https://discord.com/api/webhooks/<id>/<token>   # health alerts (optional)
+BESIDEME_WEBHOOK=https://discord.com/api/webhooks/<id>/<token>          # chapter announcements (required)
+BESIDEME_HEALTH_WEBHOOK=https://discord.com/api/webhooks/<id>/<token>   # health alerts (optional)
 ```
 
 Rules:
@@ -223,9 +226,9 @@ Rules:
   `.env` (dotenvy's default, non-overriding behaviour). Log the path loaded, never its
   values.
 - **Announcement webhook for a series:** the env var named by the per-series
-  `webhook_env` if set, otherwise `MANGA_WATCHER_WEBHOOK`. If it is unresolved, that is a
+  `webhook_env` if set, otherwise `BESIDEME_WEBHOOK`. If it is unresolved, that is a
   config error, except under `check --dry-run`.
-- **Health webhook:** `MANGA_WATCHER_HEALTH_WEBHOOK`, a **separate** channel. If it is
+- **Health webhook:** `BESIDEME_HEALTH_WEBHOOK`, a **separate** channel. If it is
   unset, health alerts are disabled and startup logs a warning. Never fall back to the
   announcement webhook. Same validation rules as below.
 - Repo hygiene, created in step 1 of §10:
@@ -254,9 +257,9 @@ Rules:
 
 ### 4.1 State file
 
-Path: `--state <path>`, else `dirs::data_local_dir()/manga-watcher/state.json`. On Windows
-that is `%LOCALAPPDATA%\manga-watcher\state.json`, on Linux
-`~/.local/share/manga-watcher/state.json`.
+Path: `--state <path>`, else `dirs::data_local_dir()/BesideME/state.json`. On Windows
+that is `%LOCALAPPDATA%\BesideME\state.json`, on Linux
+`~/.local/share/BesideME/state.json`.
 
 ```json
 {
@@ -381,7 +384,7 @@ the human asks.
 ### 4.6 Failure handling and health alerts
 
 - Any fetch/parse/HTTP failure increments `consecutive_failures`. A success resets it to 0.
-- Health messages go **only** to `MANGA_WATCHER_HEALTH_WEBHOOK` (separate channel), never
+- Health messages go **only** to `BESIDEME_HEALTH_WEBHOOK` (separate channel), never
   ping anyone, and are skipped (with a log line) when that variable is unset.
 - When `consecutive_failures` reaches `alert_after_failures` and `alert_sent == false`,
   send **one** ops embed (grey) to the health webhook: `⚠ Watcher can't read <title>:
@@ -406,7 +409,7 @@ Example for a 67.1–67.3 drop (only the last embed shown in full):
 
 ```json
 {
-  "username": "Manga Watcher",
+  "username": "Yamada",
   "content": "@everyone New chapter 67 (3 parts) of **Smoking Behind the Supermarket with You**",
   "allowed_mentions": { "parse": ["everyone"] },
   "embeds": [
@@ -461,11 +464,11 @@ Rules:
 ## 6. CLI
 
 ```
-manga-watcher check        [--config P] [--state P] [--dry-run] [--json] [--announce-on-first-run]
-manga-watcher watch        [--config P] [--state P]
-manga-watcher test-webhook [--config P] [--series URL] [--health]   # default: every distinct announcement webhook once; --health tests the health webhook
-manga-watcher list         [--config P] [--state P] [--offline]
-manga-watcher reset        (<series-url> | --all) [--state P]
+besideme-cli check        [--config P] [--state P] [--dry-run] [--json] [--announce-on-first-run]
+besideme-cli watch        [--config P] [--state P]
+besideme-cli test-webhook [--config P] [--series URL] [--health]   # default: every distinct announcement webhook once; --health tests the health webhook
+besideme-cli list         [--config P] [--state P] [--offline]
+besideme-cli reset        (<series-url> | --all) [--state P]
 Global: -v / -q, --allow-any-webhook, --env-file P
 ```
 
@@ -482,7 +485,7 @@ Exit codes for `check`, worst wins: `1` config/state error > `5` another instanc
 `watch` returns 0 on clean shutdown and 1 on startup config errors. Note in the README
 that Task Scheduler shows exit code 10 as "last result 0xA", which is normal.
 
-Logging: `tracing` to stderr plus a file in `dirs::data_local_dir()/manga-watcher/logs/`,
+Logging: `tracing` to stderr plus a file in `dirs::data_local_dir()/BesideME/logs/`,
 using `tracing-appender` daily rotation with `max_log_files(7)`. Size-based rotation is
 not built into `tracing-appender` and is not worth a custom writer. Default level `info`,
 `-v` = debug, `-q` = warn, and `RUST_LOG` overrides. `--json` switches `check` stdout to
@@ -518,7 +521,7 @@ scripting.
   waiting out a stale monotonic timer. Due series run sequentially with ≥ 2 s between
   requests. On startup, run the first check immediately.
 - Windows scheduling (document in README, don't implement a service):
-  - Simple: `schtasks /create /tn "MangaWatcher" /sc minute /mo 30 /tr "\"C:\tools\manga-watcher.exe\" check"`.
+  - Simple: `schtasks /create /tn "BesideME" /sc minute /mo 30 /tr "\"C:\tools\besideme-cli.exe\" check"`.
     A console window flashes on every run. Document configuring the task as "Run whether
     user is logged on or not", which runs it hidden.
   - Long-running: Task Scheduler "At log on" running `watch`, hidden, "restart on

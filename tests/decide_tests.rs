@@ -1,10 +1,10 @@
 //! Pure unit tests for `decide()` and split-chapter grouping (`detect.rs`, §8.3).
 #![allow(clippy::assert_is_empty, clippy::too_many_lines)]
 
-use manga_watcher::detect::{Decision, ParsedChapterNumber, Policy, decide, parse_chapter_number};
-use manga_watcher::model::{ChapterRef, SeriesSnapshot};
-use manga_watcher::sites::{MangaUp, Site};
-use manga_watcher::state::SeriesState;
+use besideme::detect::{Decision, ParsedChapterNumber, Policy, decide, parse_chapter_number};
+use besideme::model::{ChapterRef, SeriesSnapshot};
+use besideme::sites::{MangaUp, Site};
+use besideme::state::SeriesState;
 
 const FIXTURE_BASE: &str = include_str!("fixtures/manga261_base.html");
 const FIXTURE_NEW: &str = include_str!("fixtures/manga261_new.html");

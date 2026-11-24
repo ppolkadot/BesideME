@@ -16,17 +16,32 @@ pub const WARNING: Color32 = Color32::from_rgb(0xFF, 0xD6, 0x0A);
 pub const LIGHT_INACTIVE: Color32 = Color32::from_rgb(0x4A, 0x4A, 0x4D);
 pub const LIGHT_INACTIVE_RIM: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x41);
 
-/// Uses Windows' Segoe UI (native look) with Segoe UI Symbol / Emoji as fallbacks, so
-/// symbols like ⚠ ↗ ✓ render. Falls back to egui's built-in fonts elsewhere.
+const POPPINS_SEMIBOLD: &str = "Poppins SemiBold";
+
+/// Bundles Poppins and retains system and egui fonts for glyph fallback.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        (
+            "Poppins",
+            &include_bytes!("../../../assets/fonts/Poppins-Regular.ttf")[..],
+        ),
+        (
+            POPPINS_SEMIBOLD,
+            &include_bytes!("../../../assets/fonts/Poppins-SemiBold.ttf")[..],
+        ),
+    ] {
+        fonts.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
-    let mut primary = Vec::new();
     let mut fallback = Vec::new();
-    for (name, file, is_primary) in [
-        ("segoe-ui", "segoeui.ttf", true),
-        ("segoe-symbol", "seguisym.ttf", false),
-        ("segoe-emoji", "seguiemj.ttf", false),
+    for (name, file) in [
+        ("segoe-ui", "segoeui.ttf"),
+        ("segoe-symbol", "seguisym.ttf"),
+        ("segoe-emoji", "seguiemj.ttf"),
     ] {
         let path = std::path::Path::new(&windir).join("Fonts").join(file);
         if let Ok(bytes) = std::fs::read(path) {
@@ -34,23 +49,22 @@ fn install_fonts(ctx: &egui::Context) {
                 name.to_owned(),
                 std::sync::Arc::new(egui::FontData::from_owned(bytes)),
             );
-            if is_primary {
-                primary.push(name.to_owned());
-            } else {
-                fallback.push(name.to_owned());
-            }
+            fallback.push(name.to_owned());
         }
     }
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         if let Some(list) = fonts.families.get_mut(&family) {
             if family == egui::FontFamily::Proportional {
-                for (i, n) in primary.iter().enumerate() {
-                    list.insert(i, n.clone());
-                }
+                list.insert(0, "Poppins".into());
             }
             list.extend(fallback.iter().cloned());
         }
     }
+    let mut headings = fonts.families[&egui::FontFamily::Proportional].clone();
+    headings.insert(0, POPPINS_SEMIBOLD.into());
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(POPPINS_SEMIBOLD.into()), headings);
     ctx.set_fonts(fonts);
 }
 
@@ -85,9 +99,10 @@ pub fn apply(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style
-            .text_styles
-            .insert(TextStyle::Heading, FontId::proportional(17.0));
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(17.0, egui::FontFamily::Name(POPPINS_SEMIBOLD.into())),
+        );
         style
             .text_styles
             .insert(TextStyle::Body, FontId::proportional(14.0));

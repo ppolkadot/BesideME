@@ -9,11 +9,11 @@ use tempfile::TempDir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use manga_watcher::config::{Config, DEFAULT_WEBHOOK_ENV, HEALTH_WEBHOOK_ENV, LoadOptions};
-use manga_watcher::http::{FetchOutcome, SiteHttpClient};
-use manga_watcher::sites::{MangaUp, Registry, Site};
-use manga_watcher::state::{InstanceLock, StateFile};
-use manga_watcher::watcher::{
+use besideme::config::{Config, DEFAULT_WEBHOOK_ENV, HEALTH_WEBHOOK_ENV, LoadOptions};
+use besideme::http::{FetchOutcome, SiteHttpClient};
+use besideme::sites::{MangaUp, Registry, Site};
+use besideme::state::{InstanceLock, StateFile};
+use besideme::watcher::{
     CheckOptions, ExitCode, FailureKind, compute_next_delay, run_check, run_reset,
 };
 
@@ -499,7 +499,7 @@ fn backoff_schedule_and_exit_code_priority_follow_spec() {
 async fn live_manga_up_261_contract() {
     let site = MangaUp::default();
     let url = site.series_url("261");
-    let client = SiteHttpClient::new("manga-watcher/0.1 (+personal use)", Duration::from_secs(20))
+    let client = SiteHttpClient::new("BesideME/0.1 (+personal use)", Duration::from_secs(20))
         .expect("build HTTP client");
 
     let outcome = client
@@ -537,8 +537,8 @@ async fn live_manga_up_261_contract() {
 #[tokio::test]
 #[ignore = "hits the real Manga UP! site"]
 async fn live_gui_lookups_catalog_and_preview() {
-    use manga_watcher::lookup::{load_catalog, preview_series};
-    use manga_watcher::sites::search_catalog;
+    use besideme::lookup::{load_catalog, preview_series};
+    use besideme::sites::search_catalog;
     let reg = Registry::with_defaults();
     let cat = load_catalog(&reg).await.expect("catalog");
     assert!(cat.len() > 100, "catalog unexpectedly small: {}", cat.len());

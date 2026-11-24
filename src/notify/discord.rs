@@ -12,8 +12,10 @@ use crate::config::WebhookUrl;
 use crate::detect::ChapterGroup;
 use crate::model::ChapterRef;
 
-/// Default display username sent in Discord webhook payloads.
-pub const WEBHOOK_USERNAME: &str = "Manga Watcher";
+/// Display names sent with the two Discord webhook routes.
+pub const UPDATES_USERNAME: &str = "Yamada";
+/// Display name for operational health messages.
+pub const HEALTH_USERNAME: &str = "Sasaki";
 
 /// Embed color for chapter announcements and test messages (`0x3498DB`, blue).
 pub const COLOR_ANNOUNCEMENT: u32 = 3_447_003;
@@ -326,7 +328,7 @@ pub fn build_announcement_payload(
     enforce_total_embed_char_limit(&mut embeds);
 
     DiscordPayload {
-        username: WEBHOOK_USERNAME.to_string(),
+        username: UPDATES_USERNAME.to_string(),
         content: Some(content),
         allowed_mentions: AllowedMentions::for_mention(mention_trimmed),
         embeds,
@@ -449,7 +451,7 @@ pub fn build_health_alert_payload(
     );
 
     DiscordPayload {
-        username: WEBHOOK_USERNAME.to_string(),
+        username: HEALTH_USERNAME.to_string(),
         content: None,
         allowed_mentions: AllowedMentions::none(),
         embeds: vec![DiscordEmbed {
@@ -487,7 +489,7 @@ pub fn build_webhook_gone_alert_payload(
     );
 
     DiscordPayload {
-        username: WEBHOOK_USERNAME.to_string(),
+        username: HEALTH_USERNAME.to_string(),
         content: None,
         allowed_mentions: AllowedMentions::none(),
         embeds: vec![DiscordEmbed {
@@ -523,7 +525,7 @@ pub fn build_health_recovery_payload(
     );
 
     DiscordPayload {
-        username: WEBHOOK_USERNAME.to_string(),
+        username: HEALTH_USERNAME.to_string(),
         content: None,
         allowed_mentions: AllowedMentions::none(),
         embeds: vec![DiscordEmbed {
@@ -541,21 +543,30 @@ pub fn build_health_recovery_payload(
 
 /// Purely builds a `test-webhook` verification [`DiscordPayload`] (never pings anyone).
 #[must_use]
-pub fn build_test_webhook_payload(target_label: &str, timestamp_rfc3339: &str) -> DiscordPayload {
+pub fn build_test_webhook_payload(
+    target_label: &str,
+    timestamp_rfc3339: &str,
+    health: bool,
+) -> DiscordPayload {
     let safe_label = escape_discord_markdown(target_label.trim());
     let description = truncate_chars(
         &format!(
-            "Test notification from **manga-watcher** ({safe_label}). Webhook delivery is working."
+            "Test notification from **BesideME** ({safe_label}). Webhook delivery is working."
         ),
         MAX_DESCRIPTION_CHARS,
     );
 
     DiscordPayload {
-        username: WEBHOOK_USERNAME.to_string(),
+        username: if health {
+            HEALTH_USERNAME
+        } else {
+            UPDATES_USERNAME
+        }
+        .into(),
         content: None,
         allowed_mentions: AllowedMentions::none(),
         embeds: vec![DiscordEmbed {
-            title: "Manga Watcher — Test Webhook".to_string(),
+            title: "BesideME — Test Webhook".to_string(),
             url: None,
             description: Some(description),
             color: COLOR_ANNOUNCEMENT,

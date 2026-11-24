@@ -1,7 +1,7 @@
-//! Manga Watcher desktop app.
+//! The `BesideME` desktop app.
 //!
-//! * `MangaWatcher.exe` — opens the window (borderless, macOS-style traffic lights).
-//! * `MangaWatcher.exe --check` — runs one headless check and exits. Used by the scheduled
+//! * `BesideME.exe` — opens the window (borderless, macOS-style traffic lights).
+//! * `BesideME.exe --check` — runs one headless check and exits. Used by the scheduled
 //!   task: this binary has no console, so nothing flashes on screen every 30 minutes.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -9,11 +9,12 @@
 
 mod app;
 mod chrome;
+mod settings;
 mod tasks;
 mod theme;
 
+use besideme::paths::resolve_log_dir;
 use eframe::egui;
-use manga_watcher::paths::resolve_log_dir;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -30,7 +31,7 @@ fn init_file_logging() {
     }
     let Ok(appender) = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
-        .filename_prefix("manga-watcher")
+        .filename_prefix("besideme")
         .filename_suffix("log")
         .max_log_files(7)
         .build(log_dir)
@@ -73,8 +74,8 @@ fn main() {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Manga Watcher")
-        .with_app_id("manga-watcher")
+        .with_title("BesideME")
+        .with_app_id("BesideME")
         .with_inner_size([720.0, 680.0])
         .with_min_inner_size([560.0, 520.0])
         // No native caption: no Windows minimize/maximize/close buttons to interact with.
@@ -91,7 +92,7 @@ fn main() {
         ..Default::default()
     };
     if let Err(e) = eframe::run_native(
-        "Manga Watcher",
+        "BesideME",
         options,
         Box::new(|cc| Ok(Box::new(app::WatcherApp::new(cc)))),
     ) {

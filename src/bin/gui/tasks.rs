@@ -4,12 +4,12 @@
 use std::future::Future;
 use std::sync::mpsc::Sender;
 
+use besideme::config::{Config, LoadOptions};
+use besideme::lookup::{self, SeriesPreview};
+use besideme::paths::resolve_state_path;
+use besideme::sites::{CatalogEntry, Registry};
+use besideme::watcher::{CheckOptions, ExitCode, run_check};
 use eframe::egui;
-use manga_watcher::config::{Config, LoadOptions};
-use manga_watcher::lookup::{self, SeriesPreview};
-use manga_watcher::paths::resolve_state_path;
-use manga_watcher::sites::{CatalogEntry, Registry};
-use manga_watcher::watcher::{CheckOptions, ExitCode, run_check};
 
 /// Result messages from background jobs.
 pub enum Msg {

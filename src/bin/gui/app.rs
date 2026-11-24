@@ -1,26 +1,27 @@
-//! The Manga Watcher window: list watched manga, add by name search or by link, remove,
+//! The `BesideME` window: list watched manga, add by name search or by link, remove,
 //! and run a check on demand.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use besideme::config_edit::{
+    self, EditError, add_series, gui_config_path, list_series, read_or_default, remove_series,
+    validate_and_write,
+};
+use besideme::lookup::SeriesPreview;
+use besideme::model::SeriesKey;
+use besideme::paths::resolve_state_path;
+use besideme::sites::{CatalogEntry, Registry, search_catalog};
+use besideme::state::{InstanceLock, StateFile};
+use besideme::webhook_settings::WebhookSettings;
 use eframe::egui::{
     self, Align, Button, Color32, CornerRadius, Frame, Image, Key, Layout, Margin, RichText,
     ScrollArea, Stroke, TextEdit, Ui, ViewportCommand, vec2,
 };
-use manga_watcher::config::{DEFAULT_WEBHOOK_ENV, parse_dotenv_file};
-use manga_watcher::config_edit::{
-    self, EditError, add_series, gui_config_path, list_series, read_or_default, remove_series,
-    validate_and_write,
-};
-use manga_watcher::lookup::SeriesPreview;
-use manga_watcher::model::SeriesKey;
-use manga_watcher::paths::{resolve_env_file_path, resolve_state_path};
-use manga_watcher::sites::{CatalogEntry, Registry, search_catalog};
-use manga_watcher::state::{InstanceLock, StateFile};
 
 use crate::chrome;
+use crate::settings::{Settings, SettingsAction};
 use crate::tasks::{self, Msg};
 use crate::theme;
 
@@ -70,6 +71,7 @@ pub struct WatcherApp {
     status: Option<Status>,
     confirm_remove: Option<(SeriesKey, f64)>,
     webhook_missing: bool,
+    settings: Option<Settings>,
     /// Set only by the red traffic light; every other close request is cancelled.
     allow_close: bool,
 }
@@ -94,6 +96,7 @@ impl WatcherApp {
             status: None,
             confirm_remove: None,
             webhook_missing: false,
+            settings: None,
             allow_close: false,
         };
         app.refresh();
@@ -150,15 +153,8 @@ impl WatcherApp {
             })
             .collect();
 
-        self.webhook_missing = std::env::var(DEFAULT_WEBHOOK_ENV).is_err()
-            && !resolve_env_file_path(None, &self.config_path)
-                .ok()
-                .flatten()
-                .and_then(|p| parse_dotenv_file(&p).ok())
-                .is_some_and(|m| {
-                    m.get(DEFAULT_WEBHOOK_ENV)
-                        .is_some_and(|v| !v.trim().is_empty())
-                });
+        self.webhook_missing = !WebhookSettings::load(&self.config_path)
+            .is_ok_and(|settings| settings.updates_configured());
     }
 
     fn is_watched(&self, key: &SeriesKey) -> bool {
@@ -265,11 +261,23 @@ impl WatcherApp {
     fn body(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
 
+        if let Some(settings) = &mut self.settings {
+            match settings.show(ui) {
+                SettingsAction::Stay => {}
+                SettingsAction::Back => self.settings = None,
+                SettingsAction::Saved => {
+                    self.settings = None;
+                    self.refresh();
+                    self.set_status(Some(&ctx), "Discord settings saved.".into(), false);
+                }
+            }
+            return;
+        }
+
         if self.webhook_missing {
             banner(
                 ui,
-                "No Discord webhook is set, so new chapters can't be posted. Run the Manga Watcher \
-                 setup again to add it.",
+                "Set up the updates webhook in Settings to receive chapter announcements.",
             );
         }
 
@@ -282,6 +290,9 @@ impl WatcherApp {
                     .heading(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(pill("Settings", false)).clicked() {
+                    self.settings = Some(Settings::new(&self.config_path));
+                }
                 let label = if self.checking { "Checking…" } else { "Check now" };
                 let btn = ui
                     .add_enabled(!self.checking && !self.watched.is_empty(), pill(label, false))
@@ -670,7 +681,7 @@ impl eframe::App for WatcherApp {
             .corner_radius(chrome::window_radius(maximized))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                let tb = chrome::title_bar(ui, "Manga Watcher", maximized);
+                let tb = chrome::title_bar(ui, "BesideME", maximized);
                 if tb.close {
                     self.allow_close = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);

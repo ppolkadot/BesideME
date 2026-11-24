@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Application directory name under user config and local data directories.
-pub const APP_DIR_NAME: &str = "manga-watcher";
+pub const APP_DIR_NAME: &str = "BesideME";
+
+const LEGACY_APP_DIR_NAME: &str = "manga-watcher";
 
 /// Default configuration file name.
 pub const CONFIG_FILE_NAME: &str = "config.toml";
@@ -46,10 +48,11 @@ fn format_path_list(paths: &[PathBuf]) -> String {
 
 /// Resolves the `config.toml` file path using the precedence order:
 /// 1. `explicit` (`--config <path>`)
-/// 2. `dirs::config_dir()/manga-watcher/config.toml`
-/// 3. `config.toml` next to the running executable (portable install; this is what makes
+/// 2. `dirs::config_dir()/BesideME/config.toml`
+/// 3. The previous app's user config directory, when it still contains a config.
+/// 4. `config.toml` next to the running executable (portable install; this is what makes
 ///    Task Scheduler work, since it starts programs with `C:\Windows\System32` as cwd)
-/// 4. `./config.toml`
+/// 5. `./config.toml`
 pub fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf, PathError> {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -88,11 +91,13 @@ pub fn resolve_config_path_with_exe_dir(
 
     let mut candidates = Vec::with_capacity(2);
     if let Some(cfg_dir) = user_config_dir {
-        let candidate = cfg_dir.join(APP_DIR_NAME).join(CONFIG_FILE_NAME);
-        if candidate.is_file() {
-            return Ok(candidate);
+        for name in [APP_DIR_NAME, LEGACY_APP_DIR_NAME] {
+            let candidate = cfg_dir.join(name).join(CONFIG_FILE_NAME);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+            candidates.push(candidate);
         }
-        candidates.push(candidate);
     }
 
     if let Some(dir) = exe_dir {
@@ -155,13 +160,19 @@ pub fn resolve_env_file_path_with_cwd(
 
 /// Resolves the `state.json` path:
 /// 1. `explicit` (`--state <path>`)
-/// 2. `dirs::data_local_dir()/manga-watcher/state.json`
+/// 2. `dirs::data_local_dir()/BesideME/state.json`, with a fallback for existing history.
 pub fn resolve_state_path(explicit: Option<&Path>) -> Result<PathBuf, PathError> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
     }
     let data_dir = dirs::data_local_dir().ok_or(PathError::NoLocalDataDir)?;
-    Ok(data_dir.join(APP_DIR_NAME).join(STATE_FILE_NAME))
+    let current = data_dir.join(APP_DIR_NAME).join(STATE_FILE_NAME);
+    let legacy = data_dir.join(LEGACY_APP_DIR_NAME).join(STATE_FILE_NAME);
+    Ok(if !current.exists() && legacy.is_file() {
+        legacy
+    } else {
+        current
+    })
 }
 
 /// Returns the path to `state.lock` next to the given `state.json` path.
@@ -173,7 +184,7 @@ pub fn lock_path_for_state(state_path: &Path) -> PathBuf {
     }
 }
 
-/// Returns the directory for daily rotated log files (`dirs::data_local_dir()/manga-watcher/logs`).
+/// Returns the directory for daily rotated log files (`dirs::data_local_dir()/BesideME/logs`).
 pub fn resolve_log_dir() -> Result<PathBuf, PathError> {
     let data_dir = dirs::data_local_dir().ok_or(PathError::NoLocalDataDir)?;
     Ok(data_dir.join(APP_DIR_NAME).join("logs"))

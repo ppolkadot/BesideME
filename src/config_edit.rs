@@ -62,7 +62,7 @@ pub struct ListedSeries {
 }
 
 /// The `config.toml` the GUI should edit: the file the CLI would load if one exists,
-/// otherwise `%APPDATA%\manga-watcher\config.toml` (created on first save).
+/// otherwise `%APPDATA%\BesideME\config.toml` (created on first save).
 #[must_use]
 pub fn gui_config_path() -> PathBuf {
     if let Ok(p) = crate::paths::resolve_config_path(None) {

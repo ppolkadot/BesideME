@@ -27,7 +27,7 @@ pub const DEFAULT_JITTER_SECONDS: u64 = 120;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 20;
 
 /// Default descriptive User-Agent header value.
-pub const DEFAULT_USER_AGENT: &str = "manga-watcher/0.1 (+personal use)";
+pub const DEFAULT_USER_AGENT: &str = "BesideME/0.1 (+personal use)";
 
 /// Default maximum chapter-group messages sent per series per cycle.
 pub const DEFAULT_MAX_MESSAGES_PER_CYCLE: usize = 3;
@@ -39,10 +39,33 @@ pub const DEFAULT_ALERT_AFTER_FAILURES: u32 = 6;
 pub const DEFAULT_MENTION: &str = "@everyone";
 
 /// Default environment variable name for chapter announcement webhooks.
-pub const DEFAULT_WEBHOOK_ENV: &str = "MANGA_WATCHER_WEBHOOK";
+pub const DEFAULT_WEBHOOK_ENV: &str = "BESIDEME_WEBHOOK";
 
 /// Environment variable name for health alert webhooks.
-pub const HEALTH_WEBHOOK_ENV: &str = "MANGA_WATCHER_HEALTH_WEBHOOK";
+pub const HEALTH_WEBHOOK_ENV: &str = "BESIDEME_HEALTH_WEBHOOK";
+
+pub(crate) const LEGACY_UPDATES_ENV: &str = "MANGA_WATCHER_WEBHOOK";
+pub(crate) const LEGACY_HEALTH_ENV: &str = "MANGA_WATCHER_HEALTH_WEBHOOK";
+
+pub(crate) fn legacy_webhook_key(key: &str) -> Option<&'static str> {
+    match key {
+        DEFAULT_WEBHOOK_ENV => Some(LEGACY_UPDATES_ENV),
+        HEALTH_WEBHOOK_ENV => Some(LEGACY_HEALTH_ENV),
+        _ => None,
+    }
+}
+
+pub(crate) fn process_webhook_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| legacy_webhook_key(key).and_then(|old| std::env::var(old).ok()))
+}
+
+pub(crate) fn file_webhook_value(vars: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    vars.get(key)
+        .or_else(|| legacy_webhook_key(key).and_then(|old| vars.get(old)))
+        .cloned()
+}
 
 /// Redacted replacement text always used by [`WebhookUrl`]'s `Debug` and `Display`.
 pub const REDACTED_WEBHOOK: &str = "https://discord.com/api/webhooks/***";
@@ -281,7 +304,7 @@ pub struct LoadOptions {
     pub allow_missing_webhooks: bool,
 }
 
-/// Validated runtime configuration for `manga-watcher`.
+/// Validated runtime configuration for `besideme-cli`.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Path from which `config.toml` was loaded (if loaded from disk).
@@ -306,7 +329,7 @@ pub struct Config {
     pub mention: String,
     /// Optional global Discord thread/forum post ID.
     pub thread_id: Option<String>,
-    /// Optional separate health alert webhook (`MANGA_WATCHER_HEALTH_WEBHOOK`).
+    /// Optional separate health alert webhook (`BESIDEME_HEALTH_WEBHOOK`).
     pub health_webhook: Option<WebhookUrl>,
     /// Configured series entries in declaration order.
     pub series: Vec<SeriesConfig>,
@@ -421,10 +444,7 @@ impl Config {
             })?;
 
         let mut cfg = Self::from_toml_str(&toml_text, options, registry, |key| {
-            if let Ok(val) = std::env::var(key) {
-                return Some(val);
-            }
-            dotenv_vars.get(key).cloned()
+            process_webhook_value(key).or_else(|| file_webhook_value(&dotenv_vars, key))
         })?;
         cfg.config_path = Some(config_path);
         cfg.env_file_path = env_file_path;

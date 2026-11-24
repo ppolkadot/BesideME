@@ -27,13 +27,13 @@ const RENAME_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Errors returned by state persistence and instance locking operations.
 #[derive(Debug, Error)]
 pub enum StateError {
-    /// Another `manga-watcher` instance holds the exclusive lock on `state.lock`.
-    #[error("another instance of manga-watcher is already running (lock held on `{}`)", .0.display())]
+    /// Another `besideme-cli` instance holds the exclusive lock on `state.lock`.
+    #[error("another instance of besideme-cli is already running (lock held on `{}`)", .0.display())]
     Locked(PathBuf),
 
     /// The state file could not be read or parsed. Never silently re-baselines.
     #[error(
-        "state file `{}` is corrupt or unreadable ({reason}); inspect the file or run `manga-watcher reset --all` to re-baseline",
+        "state file `{}` is corrupt or unreadable ({reason}); inspect the file or run `besideme-cli reset --all` to re-baseline",
         path.display()
     )]
     Corrupt {
@@ -45,7 +45,7 @@ pub enum StateError {
 
     /// The state file has an unknown `version` field.
     #[error(
-        "state file `{}` uses unsupported version {version} (expected {STATE_VERSION}); run `manga-watcher reset --all` to re-baseline",
+        "state file `{}` uses unsupported version {version} (expected {STATE_VERSION}); run `besideme-cli reset --all` to re-baseline",
         path.display()
     )]
     UnsupportedVersion {
