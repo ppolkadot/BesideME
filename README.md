@@ -11,6 +11,8 @@ BesideME is a Windows desktop app and Rust command-line tool that watches manga 
 - **Strict secret separation**: Discord webhook URLs live **only** in a gitignored `.env` file, never in `config.toml`, and are redacted in all `Debug`/`Display` and log outputs.
 - **Operational health alerts**: Consecutive failures trigger a single non-pinging alert to a separate health webhook (`BESIDEME_HEALTH_WEBHOOK`), followed by a recovery notice when the site succeeds again.
 - **Single-instance file lock**: An OS-level lock on `state.lock` (`std::fs::File::try_lock`) prevents overlapping `check` and `watch` runs from double-announcing.
+- **Release shelf (desktop app)**: Titles you follow appear as cover-led cards with **All / Unread / Issues** filters. Chapters found after a series was baselined show as *New* until you mark them read; upgrading or adding a series never creates phantom unread badges.
+- **Check status**: The app shows when the last check finished, which titles failed and why, what Windows reports for the background task, and live progress for manual checks.
 
 ---
 
@@ -21,7 +23,7 @@ Run `BesideME-Setup-<version>.exe`. The wizard:
 1. installs per-user (no admin) to `%LOCALAPPDATA%\Programs\BesideME`;
 2. offers Discord setup on a fresh install and stores the URLs in `%APPDATA%\BesideME\.env`;
 3. optionally creates the scheduled task **"BesideME"**, which runs `BesideME.exe --check` every 30 minutes with no console window;
-4. opens **BesideME**, where you add manga by **searching by name** or **pasting a link**.
+4. opens **BesideME**, where you add manga with **Quick Add**: search by name or paste a link.
 
 The app window is borderless: it has no Windows minimize/maximize/close buttons. Use the
 macOS-style traffic lights in the top-left corner (red = close, yellow = minimize,
@@ -29,10 +31,75 @@ green = zoom). Alt+F4 and the taskbar's "Close window" are ignored on purpose; o
 red button closes the app. Uninstalling removes the task and asks before deleting the
 current BesideME settings and local data.
 
-Open **Settings** from the watchlist to add or update the Discord URLs. **Yamada** posts
-chapter updates. **Sasaki** posts health and recovery alerts to a separate destination.
-Leave the health URL blank to disable health alerts. Settings masks the URLs by default.
+### The release shelf
+
+The window opens on the manga you follow, in a dark, cover-led shelf (Poppins type,
+coral accent). Each card shows the cover, the latest chapter, when it was last checked,
+and what needs attention.
+
+- **All / Unread / Issues** filters, with counts. *Unread* lists titles whose newest
+  chapters were discovered after the series was baselined and that you have not marked
+  read; *Issues* lists titles whose last check failed, with the reason on the card.
+- **Open chapter** opens the newest unread chapter on Manga UP! in your browser (only
+  official Manga UP! links are ever opened). **Mark read** clears the title's unread
+  badge. **Open series** opens the series page. **Retry** re-checks just that title.
+  **Remove** asks for confirmation (press it twice) before it stops watching a title.
+- A missing cover keeps its 16:9 slot with the title's initial, so rows never jump and
+  titles stay readable even when an image fails to load or the title is long or non-Latin.
+- Everything is reachable with the keyboard (Tab, Shift+Tab, Enter/Space); the control
+  with focus is ringed in white. The traffic lights have accessible names too
+  ("Close window", "Minimize window", "Zoom window"). `Ctrl` + `+`/`-`/`0` zooms the UI.
+  On small or heavily scaled screens the window opens smaller and, when height is very
+  tight, the whole page scrolls.
+
+### Status strip
+
+The strip above the shelf answers "when did the last check finish and is anything
+wrong?" It reads the checker's persisted run summary, so a result from the scheduled
+task appears within a couple of seconds without restarting the app.
+
+- Last check: how long ago, how many titles had problems, and when the last fully
+  successful check was. A check that never finished is reported as interrupted.
+- Background task: what Windows reports for the **"BesideME"** scheduled task. A next-run
+  time appears only when the task exists, is enabled, and Windows reports one. *Turned
+  off*, *not set up*, and *couldn't read Task Scheduler* are shown as different states,
+  never as a healthy idle task. The query is read-only (it never creates, edits, enables,
+  or runs a task) and is refreshed about once a minute.
+- **Check now** runs the same check as the scheduled task, with a progress bar
+  ("Checking 2 of 5 · Title") while the rest of the app stays usable. If a background
+  check already holds the instance lock the app says so instead of waiting.
+- **Retry** checks a single title through the same checker code, the same instance lock
+  and the same Discord delivery rules. It is refused for 30 seconds after a title was last
+  checked, and until `Retry-After` has passed after a rate limit (HTTP 403/429).
+
+### Quick Add
+
+Press **Ctrl+K** or choose **Add manga**. One panel handles both ways of adding:
+
+- Type a title to search the cached Manga UP! catalog; use Up/Down to move through the
+  results and **Enter** to add the highlighted one (or press the result's **Add** button).
+- Paste a Manga UP! link (even without `https://`) to preview the page first, then add it.
+  The preview is requested after a short pause or when you press Enter. An answer for
+  text you have since changed is discarded and can never be added.
+- Titles you already follow show **Already watching**. If the catalog can't be loaded the
+  panel says so, offers **Retry catalog**, and pasting a link keeps working.
+- **Esc** closes the panel and returns keyboard focus to where it was.
+
+### Discord settings
+
+Open **Settings** to add or update the Discord URLs. **Yamada** posts chapter updates.
+**Sasaki** posts health and recovery alerts to a separate destination. Leave the health
+URL blank to disable health alerts. Settings masks the URLs by default.
 Launching the app again or rerunning setup is unnecessary after saving.
+
+Each destination has its own **Send test** button. A click posts exactly one message
+labelled "Yamada · chapter updates destination" or "Sasaki · health alerts destination"
+(an embed that cannot mention anyone) to the URL currently typed in the field, saved or
+not. "Delivered" is shown only after Discord accepts the message. A malformed URL, a
+deleted or revoked webhook (HTTP 401/403/404), a rejected message, a rate limit, and a
+network problem each get their own actionable message next to the field. Changing the URL
+clears its result, and an answer that arrives after the URL changed is ignored. URLs and
+tokens are never written to the log or shown in any message.
 
 For a silent install, use `BesideME-Setup-<version>.exe /VERYSILENT /TASKS=background`.
 The optional `/WEBHOOK` and `/HEALTHWEBHOOK` arguments can seed a fresh settings file.
@@ -52,7 +119,39 @@ with Pillow installed to regenerate the 16–256 px ICO, window PNG, and 100%/20
 wizard images. The app embeds Poppins Regular and SemiBold. The font license is in
 [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt).
 
-See the [redesign proposal](docs/redesign-plan.md) for the next release.
+The [redesign plan](docs/redesign-plan.md) describes the design and what was deliberately
+left for later (tray mode, Windows toasts, an in-app reader, other providers, cloud sync,
+theme editing).
+
+### Files
+
+| File | Where | What |
+| --- | --- | --- |
+| `config.toml` | `%APPDATA%\BesideME` | Watchlist and checker settings (no secrets). |
+| `.env` | next to `config.toml` | Discord webhook URLs. |
+| `state.json` | `%LOCALAPPDATA%\BesideME` | Checker state: announced chapters, per-title check results and failure reason, discovered releases (at most 24 per title), and the last run summary. Written only by the checker, under `state.lock`. Still schema version 2: the new fields are optional, so existing files load unchanged and show nothing as unread. A copy of the previous version that rewrites the file simply drops the new fields. |
+| `reads.json` | next to `state.json` | Which discovered releases you marked read (at most 200 per title). Written only by the app, under its own short-lived `reads.lock`, so marking read never waits for, or collides with, a running check. A damaged file is set aside as `reads.json.bad` and treated as empty. |
+| `logs\` | next to `state.json` | Daily rotated logs (7 kept). |
+
+Discovery rules: a chapter group is recorded the moment a check finds it unannounced on a
+series that already has a baseline, so it shows on the shelf even while Discord delivery
+is failing, and it is never recorded twice (across restarts, repeated failed deliveries, or
+a group that grows while undelivered). `check --dry-run` records nothing. Baselines (a new
+series, `reset`, or a re-baseline after repeated anomalies) never create unread entries.
+With `--announce-on-first-run` the announced chapter is recorded only once Discord accepts
+it. The stored link is the provider's own chapter page; anything else is replaced by the
+official series page.
+
+### Testing without touching an install
+
+These variables make smoke tests hermetic; none is needed in normal use.
+
+| Variable | Effect |
+| --- | --- |
+| `BESIDEME_PROFILE_DIR` | Keep `config.toml`, `.env`, `state.json`, `reads.json` and logs in this one folder; no other location is read. |
+| `BESIDEME_SITE_URL` | Point Manga UP! at a local fixture server (`https`, or `http` on loopback). |
+| `BESIDEME_ALLOW_ANY_WEBHOOK=1` | Same as `--allow-any-webhook`, for the CLI and the app (loopback mock webhooks). |
+| `BESIDEME_TASK_NAME` | Query a different scheduled task in the status strip. |
 
 ---
 
@@ -155,7 +254,7 @@ besideme-cli reset        (<series-url> | --all) [--state P]
 Global flags: -v / -q, --allow-any-webhook, --env-file P
 ```
 
-- **State file location**: `--state <path>`, defaulting to `%LOCALAPPDATA%\BesideME\state.json` on Windows (`~/.local/share/BesideME/state.json` on Linux).
+- **State file location**: `--state <path>`, defaulting to `%LOCALAPPDATA%\BesideME\state.json` on Windows (`~/.local/share/BesideME/state.json` on Linux). `besideme-cli check` records the same discovered releases, per-title results, and run summary as the desktop app's scheduled check (`watch` records discoveries and per-title results, but no run summary). Exit codes, flags, and JSON output are unchanged.
 - **Log files**: Daily rotated logs (retaining 7 files) are written to `%LOCALAPPDATA%\BesideME\logs\` alongside `stderr`.
 
 ### Exit Codes

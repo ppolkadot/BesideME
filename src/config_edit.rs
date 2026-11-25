@@ -68,6 +68,9 @@ pub fn gui_config_path() -> PathBuf {
     if let Ok(p) = crate::paths::resolve_config_path(None) {
         return p;
     }
+    if let Some(profile) = crate::paths::profile_dir_override() {
+        return profile.join(CONFIG_FILE_NAME);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(APP_DIR_NAME)

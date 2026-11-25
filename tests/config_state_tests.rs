@@ -406,6 +406,7 @@ fn state_atomic_write_roundtrip_and_corruption_handling() {
             alert_sent: false,
             etag: Some("\"sln4x33xql78nt\"".to_string()),
             consecutive_anomalies: 0,
+            ..SeriesState::default()
         },
     );
     state.save_atomic(&state_path).expect("save atomic");

@@ -25,3 +25,14 @@ UI/UX Pro Max identified minimalist hierarchy, a restrained accent, visible keyb
 - Build and run the Windows installer with and without background checks. Confirm the desktop and headless check agree on the watchlist and webhook settings. Check scheduling after a sign-out and report a next run only when Windows can provide it.
 
 Keep the next release focused on Manga UP! and official browser links. Defer tray mode and Windows toasts until the scheduled-task lifecycle and the traffic-light close behavior have been verified together. Defer an in-app reader, other manga providers, cloud sync, and theme editing.
+
+## Implementation notes
+
+All four phases are implemented; the README describes the behavior. Choices made while implementing the plan:
+
+- **State.** `state.json` stays at schema version 2. The new per-title `discovered`, `last_error` and `retry_not_before_unix` fields and the top-level `last_run` are optional, so existing files and installs load unchanged and older binaries ignore them. Unread markers live in `reads.json` under `reads.lock`, never in `state.json`, so the app and a scheduled check can write at the same time.
+- **Discovery.** A group is recorded when a check finds it unannounced on a baselined series, keyed by its newest part. Re-detection (restart, delivery retry, dry run, a group that grows) is idempotent; baselines and re-baselines record nothing. Links are validated by the provider (`Site::is_official_url`) and fall back to the official series page; the app validates again before opening a link.
+- **Run summary.** Full, non-dry runs write a start record and a finish record under the instance lock. The app derives the strip from per-title state plus that record, so a single-title retry is reflected without replacing the run.
+- **Task status.** Read-only PowerShell query of the `BesideME` task (exists, enabled, next run). A next run is shown only when Windows reports one.
+- **Window sizing.** The window keeps its 720 × 680 size but opens smaller on screens that cannot hold it. Very small or heavily zoomed windows scroll the whole page.
+- **Skills.** The UI/UX Pro Max skill was not installed in the implementation environment, so the plan's design rules (palette, 8-point grid, 16:9 covers, visible focus, inline validation, actionable empty states) were applied directly and contrast is asserted by unit tests.

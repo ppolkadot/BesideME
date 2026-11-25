@@ -18,6 +18,15 @@ pub const STATE_VERSION: u32 = 2;
 /// Maximum number of announced chapter IDs retained per series.
 pub const MAX_ANNOUNCED_IDS: usize = 5_000;
 
+/// Maximum number of newly discovered chapter groups retained per series.
+pub const MAX_DISCOVERED_PER_SERIES: usize = 24;
+
+/// Maximum characters kept from an error message persisted for display.
+pub const MAX_ERROR_CHARS: usize = 200;
+
+/// A run that started but never finished is shown as "interrupted" after this long.
+pub const RUN_STALE_AFTER_SECS: i64 = 15 * 60;
+
 /// Number of rename retry attempts on Windows when antivirus/indexer briefly holds the target file.
 const RENAME_MAX_RETRIES: u32 = 3;
 
@@ -73,6 +82,12 @@ pub struct StateFile {
     pub version: u32,
     /// Per-series state keyed by `"<site_id>:<key>"` (e.g. `"mangaup:261"`).
     pub series: BTreeMap<String, SeriesState>,
+    /// Summary of the most recent full check run (scheduled or manual).
+    ///
+    /// Written by the checker while it holds the instance lock; absent in files written by
+    /// earlier versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<RunRecord>,
 }
 
 impl Default for StateFile {
@@ -80,6 +95,7 @@ impl Default for StateFile {
         Self {
             version: STATE_VERSION,
             series: BTreeMap::new(),
+            last_run: None,
         }
     }
 }
@@ -106,6 +122,116 @@ pub struct SeriesState {
     /// Number of consecutive anomaly detections (re-baselines on the 3rd consecutive anomaly).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub consecutive_anomalies: u32,
+    /// Newly discovered chapter groups, oldest first, capped at [`MAX_DISCOVERED_PER_SERIES`].
+    ///
+    /// Empty in files written by earlier versions: upgrading never creates unread releases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discovered: Vec<DiscoveredRelease>,
+    /// Short, redacted reason the most recent check of this series failed (cleared on success).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Unix timestamp before which a manual retry of this series is refused
+    /// (set after a rate-limit or block response).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_not_before_unix: Option<i64>,
+}
+
+/// A chapter group the checker discovered after the series was baselined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveredRelease {
+    /// Identifier of the newest part in the group; read markers refer to it.
+    pub id: String,
+    /// Label of the newest part, e.g. `"Chapter 67.3"`.
+    pub label: String,
+    /// Optional subtitle of the newest part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+    /// Official provider link for the group's newest part (or the series page as a fallback).
+    pub url: String,
+    /// Identifiers of every part in the group, oldest first.
+    pub part_ids: Vec<String>,
+    /// Unix timestamp of the first detection.
+    pub discovered_unix: i64,
+}
+
+/// Persisted summary of the last full check run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// Unix timestamp when the run started.
+    pub started_unix: i64,
+    /// Unix timestamp when the run finished (`None` while running or if it was interrupted).
+    #[serde(default)]
+    pub finished_unix: Option<i64>,
+    /// Combined process exit code of the finished run.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Series checked successfully (including baselines and no-change results).
+    #[serde(default)]
+    pub ok: usize,
+    /// Series whose check failed.
+    #[serde(default)]
+    pub failed: usize,
+    /// Chapter groups announced to Discord.
+    #[serde(default)]
+    pub announced_groups: usize,
+    /// Unix timestamp of the most recent run that finished without any failed series.
+    #[serde(default)]
+    pub last_success_unix: Option<i64>,
+}
+
+/// How a persisted [`RunRecord`] should be presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhase {
+    /// A run is in progress right now.
+    Running,
+    /// The run finished; check [`RunRecord::failed`] for per-title problems.
+    Finished,
+    /// The run started but never finished (the process was stopped).
+    Interrupted,
+}
+
+impl RunRecord {
+    /// Classifies the record relative to `now_unix`.
+    #[must_use]
+    pub const fn phase(&self, now_unix: i64) -> RunPhase {
+        if self.finished_unix.is_some() {
+            RunPhase::Finished
+        } else if now_unix - self.started_unix <= RUN_STALE_AFTER_SECS {
+            RunPhase::Running
+        } else {
+            RunPhase::Interrupted
+        }
+    }
+
+    /// Unix time of the last attempt that reached an end state.
+    #[must_use]
+    pub fn last_attempt_unix(&self) -> i64 {
+        self.finished_unix.unwrap_or(self.started_unix)
+    }
+}
+
+/// Redacts and bounds a message before it is persisted or shown.
+///
+/// Control characters are removed and anything that looks like a URL is replaced, so a
+/// webhook URL can never end up in `state.json`.
+#[must_use]
+pub fn sanitize_error(message: &str) -> String {
+    let mut out = String::with_capacity(message.len().min(MAX_ERROR_CHARS));
+    for word in message.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if word.contains("://") {
+            out.push_str("<link>");
+        } else {
+            out.extend(word.chars().filter(|c| !c.is_control()));
+        }
+    }
+    if out.chars().count() > MAX_ERROR_CHARS {
+        out = out.chars().take(MAX_ERROR_CHARS - 1).collect();
+        out.push('…');
+    }
+    out
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -128,6 +254,68 @@ impl SeriesState {
             }
         }
         self.prune_to_cap(current_snapshot_ids);
+    }
+
+    /// Records newly discovered chapter groups (oldest first) and returns whether anything changed.
+    ///
+    /// Recording is idempotent: a group whose parts are all already known is ignored, and a
+    /// group that extends a known one replaces it while keeping the earliest detection time.
+    /// The list is bounded to [`MAX_DISCOVERED_PER_SERIES`], dropping the oldest groups.
+    pub fn record_discovered<I>(&mut self, releases: I) -> bool
+    where
+        I: IntoIterator<Item = DiscoveredRelease>,
+    {
+        let mut changed = false;
+        for incoming in releases {
+            if incoming.part_ids.is_empty() {
+                continue;
+            }
+            if self.discovered.iter().any(|known| {
+                incoming
+                    .part_ids
+                    .iter()
+                    .all(|id| known.part_ids.contains(id))
+            }) {
+                continue;
+            }
+            let overlaps: Vec<usize> = self
+                .discovered
+                .iter()
+                .enumerate()
+                .filter(|(_, known)| {
+                    known
+                        .part_ids
+                        .iter()
+                        .any(|id| incoming.part_ids.contains(id))
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+            let mut merged = incoming;
+            for &idx in &overlaps {
+                let known = &self.discovered[idx];
+                merged.discovered_unix = merged.discovered_unix.min(known.discovered_unix);
+                for id in known.part_ids.iter().rev() {
+                    if !merged.part_ids.contains(id) {
+                        merged.part_ids.insert(0, id.clone());
+                    }
+                }
+            }
+            if let Some(&first) = overlaps.first() {
+                for &idx in overlaps.iter().skip(1).rev() {
+                    self.discovered.remove(idx);
+                }
+                self.discovered[first] = merged;
+            } else {
+                self.discovered.push(merged);
+            }
+            changed = true;
+        }
+        if self.discovered.len() > MAX_DISCOVERED_PER_SERIES {
+            let excess = self.discovered.len() - MAX_DISCOVERED_PER_SERIES;
+            self.discovered.drain(0..excess);
+            changed = true;
+        }
+        changed
     }
 
     /// Enforces the [`MAX_ANNOUNCED_IDS`] cap, pruning IDs absent from `current_snapshot_ids` first.

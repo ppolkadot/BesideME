@@ -90,6 +90,14 @@ pub trait Site: Send + Sync {
     /// Purely parses the fetched HTML body into a [`SeriesSnapshot`].
     fn parse(&self, key: &str, body: &str) -> Result<SeriesSnapshot, ParseError>;
 
+    /// Whether `url` is a page on this provider's own official site.
+    ///
+    /// Links recorded for the user to open (new releases) must satisfy this; anything else is
+    /// replaced by the official series page. The default refuses every URL.
+    fn is_official_url(&self, _url: &reqwest::Url) -> bool {
+        false
+    }
+
     /// Optional: the single public page listing every title on the site, used by the GUI's
     /// "search by name" (fetched once, then filtered locally). `None` = search unsupported.
     fn catalog_url(&self) -> Option<reqwest::Url> {
@@ -176,9 +184,12 @@ impl Registry {
 
     /// Creates the default production [`Registry`] with Manga UP! Global registered.
     #[must_use]
+    ///
+    /// `BESIDEME_SITE_URL` (an `https` URL, or `http` on loopback) points Manga UP! at a local
+    /// fixture server for smoke tests; any other value is ignored.
     pub fn with_defaults() -> Self {
         let mut reg = Self::empty();
-        reg.register(Box::new(MangaUp::default()));
+        reg.register(Box::new(site_override().unwrap_or_default()));
         reg
     }
 
@@ -212,10 +223,37 @@ impl Registry {
         None
     }
 
+    /// Whether any registered site recognises `url` as one of its own official pages.
+    #[must_use]
+    pub fn is_official_url(&self, url: &reqwest::Url) -> bool {
+        self.sites.iter().any(|site| site.is_official_url(url))
+    }
+
     /// Returns an iterator over all registered sites.
     pub fn iter(&self) -> impl Iterator<Item = &dyn Site> {
         self.sites.iter().map(std::convert::AsRef::as_ref)
     }
+}
+
+/// Environment variable that redirects Manga UP! to a local fixture server.
+pub const SITE_URL_ENV: &str = "BESIDEME_SITE_URL";
+
+fn site_override() -> Option<MangaUp> {
+    let raw = std::env::var(SITE_URL_ENV).ok()?;
+    let url = reqwest::Url::parse(raw.trim()).ok()?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    let acceptable = url.scheme() == "https" || (url.scheme() == "http" && loopback);
+    if !acceptable || url.cannot_be_a_base() {
+        tracing::warn!("ignoring {SITE_URL_ENV}: expected an https URL or an http loopback URL");
+        return None;
+    }
+    Some(MangaUp::new(url.clone(), url))
 }
 
 impl Default for Registry {

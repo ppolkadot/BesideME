@@ -115,6 +115,12 @@ impl Site for MangaUp {
         }
     }
 
+    fn is_official_url(&self, url: &Url) -> bool {
+        url.origin() == self.base_url.origin()
+            && url.username().is_empty()
+            && url.password().is_none()
+    }
+
     fn series_url(&self, key: &str) -> Url {
         let mut url = self.base_url.clone();
         url.set_path(&format!("manga/{key}"));

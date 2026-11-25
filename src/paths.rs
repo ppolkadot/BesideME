@@ -18,6 +18,21 @@ pub const STATE_FILE_NAME: &str = "state.json";
 /// Single-instance lock file name placed next to the state file.
 pub const LOCK_FILE_NAME: &str = "state.lock";
 
+/// Environment variable that confines every `BesideME` file to one directory.
+///
+/// When set, `config.toml`, `.env`, `state.json`, `reads.json`, and the logs live directly in
+/// that directory and no other location (including a previous install) is consulted. It exists
+/// so tests and smoke runs never touch a real installation.
+pub const PROFILE_DIR_ENV: &str = "BESIDEME_PROFILE_DIR";
+
+/// The directory named by [`PROFILE_DIR_ENV`], when set and non-empty.
+#[must_use]
+pub fn profile_dir_override() -> Option<PathBuf> {
+    std::env::var_os(PROFILE_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Errors returned when resolving application paths.
 #[derive(Debug, Error)]
 pub enum PathError {
@@ -54,6 +69,16 @@ fn format_path_list(paths: &[PathBuf]) -> String {
 ///    Task Scheduler work, since it starts programs with `C:\Windows\System32` as cwd)
 /// 5. `./config.toml`
 pub fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf, PathError> {
+    if explicit.is_none()
+        && let Some(profile) = profile_dir_override()
+    {
+        let candidate = profile.join(CONFIG_FILE_NAME);
+        return if candidate.is_file() {
+            Ok(candidate)
+        } else {
+            Err(PathError::ConfigNotFound(vec![candidate]))
+        };
+    }
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf));
@@ -165,6 +190,9 @@ pub fn resolve_state_path(explicit: Option<&Path>) -> Result<PathBuf, PathError>
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
     }
+    if let Some(profile) = profile_dir_override() {
+        return Ok(profile.join(STATE_FILE_NAME));
+    }
     let data_dir = dirs::data_local_dir().ok_or(PathError::NoLocalDataDir)?;
     let current = data_dir.join(APP_DIR_NAME).join(STATE_FILE_NAME);
     let legacy = data_dir.join(LEGACY_APP_DIR_NAME).join(STATE_FILE_NAME);
@@ -186,6 +214,9 @@ pub fn lock_path_for_state(state_path: &Path) -> PathBuf {
 
 /// Returns the directory for daily rotated log files (`dirs::data_local_dir()/BesideME/logs`).
 pub fn resolve_log_dir() -> Result<PathBuf, PathError> {
+    if let Some(profile) = profile_dir_override() {
+        return Ok(profile.join("logs"));
+    }
     let data_dir = dirs::data_local_dir().ok_or(PathError::NoLocalDataDir)?;
     Ok(data_dir.join(APP_DIR_NAME).join("logs"))
 }

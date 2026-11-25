@@ -8,22 +8,31 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::config::{Config, SeriesConfig, WebhookUrl};
+use crate::detect::ChapterGroup;
 use crate::detect::{Decision, Policy, REBASELINE_AFTER_CONSECUTIVE_ANOMALIES, decide};
 use crate::http::{FetchOutcome, HttpError, SiteHttpClient};
-use crate::model::SeriesSnapshot;
+use crate::model::{ChapterRef, SeriesKey, SeriesSnapshot};
 use crate::notify::discord::{
     AnnouncementContext, DiscordClient, DiscordError, GROUP_POST_GAP, build_announcement_payload,
     build_health_alert_payload, build_health_recovery_payload, build_test_webhook_payload,
     build_webhook_gone_alert_payload, now_rfc3339_utc,
 };
-use crate::sites::{ParseError, Registry};
-use crate::state::{InstanceLock, SeriesState, StateError, StateFile};
+use crate::sites::{ParseError, Registry, Site};
+use crate::state::{
+    DiscoveredRelease, InstanceLock, RunRecord, SeriesState, StateError, StateFile, sanitize_error,
+};
 
 /// Minimum delay between sequential series requests in `watch` mode (§7).
 pub const INTER_SERIES_GAP: Duration = Duration::from_secs(2);
 
 /// Maximum wall-clock sleep slice in `watch` mode before re-checking due times (§7).
 pub const WATCH_MAX_SLEEP_SLICE: Duration = Duration::from_secs(60);
+
+/// Minimum time between two checks of the same series when the user asks for a single-title retry.
+pub const RETRY_COOLDOWN_SECS: i64 = 30;
+
+/// Retry refusal period after a 403/429 block that carried no `Retry-After` header.
+pub const BLOCKED_RETRY_SECS: i64 = 300;
 
 /// Maximum backoff cap for consecutive 403/429 blocks (6 hours, §7).
 pub const MAX_BLOCK_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
@@ -191,12 +200,68 @@ pub fn compute_next_delay(
     }
 }
 
+/// Progress notifications emitted by [`run_check_scoped`] for interactive callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckProgress {
+    /// The lock is held and the run is about to check `total` series.
+    Started {
+        /// Number of series that will be checked.
+        total: usize,
+    },
+    /// A series check is starting.
+    SeriesStarted {
+        /// Zero-based position within the run.
+        index: usize,
+        /// Number of series in the run.
+        total: usize,
+        /// Composite series key (`"<site_id>:<key>"`).
+        series_key: String,
+    },
+    /// A series check finished.
+    SeriesFinished {
+        /// Zero-based position within the run.
+        index: usize,
+        /// Number of series in the run.
+        total: usize,
+        /// Composite series key (`"<site_id>:<key>"`).
+        series_key: String,
+        /// Outcome label of the series report.
+        outcome: String,
+        /// Failure reason, if any.
+        error: Option<String>,
+    },
+}
+
 /// Runs a single sequential check pass over all configured series (`besideme-cli check`).
 pub async fn run_check(
     config: &Config,
     registry: &Registry,
     state_path: &Path,
     options: CheckOptions,
+) -> CheckRunSummary {
+    run_check_scoped(config, registry, state_path, options, None, &mut |_| {}).await
+}
+
+fn unix_now() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// Runs a check pass over all series, or only over `only` (a single-title retry).
+///
+/// Both forms take the same instance lock, fetch through the same HTTP client and deliver
+/// through the same Discord rules, so a retry can neither run beside another check nor skip
+/// the scheduled run's checks. A single-title run additionally refuses to re-fetch a series
+/// that was checked in the last [`RETRY_COOLDOWN_SECS`] seconds or that is rate limited.
+///
+/// Full, non-dry runs persist a [`RunRecord`] (started, finished, counts) in the state file.
+#[allow(clippy::too_many_lines)]
+pub async fn run_check_scoped(
+    config: &Config,
+    registry: &Registry,
+    state_path: &Path,
+    options: CheckOptions,
+    only: Option<&SeriesKey>,
+    progress: &mut (dyn FnMut(CheckProgress) + Send),
 ) -> CheckRunSummary {
     let _lock = if options.dry_run {
         None
@@ -259,11 +324,44 @@ pub async fn run_check(
         }
     };
 
+    let selected: Vec<&SeriesConfig> = config
+        .series
+        .iter()
+        .filter(|s| only.is_none_or(|key| &s.key == key))
+        .collect();
+    if only.is_some() && selected.is_empty() {
+        tracing::error!("the requested series is not in the watchlist");
+        return CheckRunSummary {
+            exit_code: ExitCode::ConfigOrStateError,
+            reports: Vec::new(),
+        };
+    }
+
+    // Persist a run summary for full, real runs so other processes can show progress and result.
+    let record_run = !options.dry_run && only.is_none();
+    let previous_success = state.last_run.as_ref().and_then(|r| r.last_success_unix);
+    if record_run {
+        state.last_run = Some(RunRecord {
+            started_unix: unix_now(),
+            last_success_unix: previous_success,
+            ..RunRecord::default()
+        });
+        let _ = persist_state_if_needed(&state, state_path, false);
+    }
+
+    let total = selected.len();
+    progress(CheckProgress::Started { total });
+
     let mut gone_webhooks: HashSet<WebhookUrl> = HashSet::new();
     let mut overall_code = ExitCode::Ok;
-    let mut reports = Vec::with_capacity(config.series.len());
+    let mut reports = Vec::with_capacity(total);
 
-    for series_cfg in &config.series {
+    for (index, series_cfg) in selected.into_iter().enumerate() {
+        progress(CheckProgress::SeriesStarted {
+            index,
+            total,
+            series_key: series_cfg.key.as_state_key(),
+        });
         let mut outcome = check_single_series(
             config,
             series_cfg,
@@ -274,6 +372,7 @@ pub async fn run_check(
             state_path,
             &mut gone_webhooks,
             options,
+            only.is_some(),
         )
         .await;
 
@@ -283,7 +382,31 @@ pub async fn run_check(
         {
             println!("{line}");
         }
+        progress(CheckProgress::SeriesFinished {
+            index,
+            total,
+            series_key: series_cfg.key.as_state_key(),
+            outcome: outcome.report.outcome.clone(),
+            error: outcome.report.error.clone(),
+        });
         reports.push(std::mem::take(&mut outcome.report));
+    }
+
+    if record_run {
+        let failed = reports.iter().filter(|r| r.error.is_some()).count();
+        let finished = unix_now();
+        let announced_groups = reports.iter().map(|r| r.announced_groups).sum();
+        if let Some(run) = state.last_run.as_mut() {
+            run.finished_unix = Some(finished);
+            run.exit_code = Some(overall_code.as_i32());
+            run.ok = reports.len() - failed;
+            run.failed = failed;
+            run.announced_groups = announced_groups;
+            if failed == 0 {
+                run.last_success_unix = Some(finished);
+            }
+        }
+        overall_code = overall_code.combine(persist_state_if_needed(&state, state_path, false));
     }
 
     CheckRunSummary {
@@ -309,6 +432,7 @@ async fn check_single_series(
     state_path: &Path,
     gone_webhooks: &mut HashSet<WebhookUrl>,
     options: CheckOptions,
+    enforce_retry_gap: bool,
 ) -> SingleSeriesOutcome {
     let state_key = series_cfg.key.as_state_key();
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
@@ -329,6 +453,27 @@ async fn check_single_series(
     };
 
     let prior_state = state.series.get(&state_key).cloned();
+
+    if enforce_retry_gap
+        && !options.dry_run
+        && let Some(wait) = prior_state
+            .as_ref()
+            .and_then(|s| retry_wait_secs(s, now_unix))
+    {
+        return SingleSeriesOutcome {
+            exit_code: ExitCode::Ok,
+            failure_kind: None,
+            report: SeriesCheckReport {
+                series_key: state_key,
+                url: series_cfg.fetch_url.to_string(),
+                title: series_cfg.label.clone(),
+                outcome: "cooldown".to_string(),
+                error: Some(format!("Too soon to check again; try in {wait}s")),
+                ..SeriesCheckReport::default()
+            },
+        };
+    }
+
     let prior_etag = prior_state.as_ref().and_then(|s| s.etag.as_deref());
 
     let fetch_res = http_client.fetch(&series_cfg.fetch_url, prior_etag).await;
@@ -366,6 +511,26 @@ async fn check_single_series(
                 options.dry_run,
             )
             .await;
+
+            if !options.dry_run
+                && let Some(entry) = state.series.get_mut(&state_key)
+            {
+                entry.last_error = Some(sanitize_error(&http_err.to_string()));
+                entry.retry_not_before_unix = match http_err {
+                    HttpError::BlockedOrRateLimited {
+                        retry_after_secs, ..
+                    } => {
+                        let max_wait =
+                            i64::try_from(MAX_BLOCK_BACKOFF.as_secs()).unwrap_or(i64::MAX);
+                        let wait = retry_after_secs
+                            .and_then(|s| i64::try_from(s).ok())
+                            .unwrap_or(BLOCKED_RETRY_SECS)
+                            .clamp(0, max_wait);
+                        Some(now_unix.saturating_add(wait))
+                    }
+                    _ => None,
+                };
+            }
 
             let failure_kind = match http_err {
                 HttpError::BlockedOrRateLimited {
@@ -471,6 +636,12 @@ async fn check_single_series(
             )
             .await;
 
+            if !options.dry_run
+                && let Some(entry) = state.series.get_mut(&state_key)
+            {
+                entry.last_error = Some(sanitize_error(&parse_err.to_string()));
+            }
+
             let code = persist_state_if_needed(state, state_path, options.dry_run)
                 .combine(ExitCode::ParseError);
 
@@ -522,7 +693,7 @@ async fn check_single_series(
     apply_decision(
         config,
         series_cfg,
-        site.display_name(),
+        site,
         &display_title,
         &snapshot,
         decision,
@@ -542,7 +713,7 @@ async fn check_single_series(
 async fn apply_decision(
     config: &Config,
     series_cfg: &SeriesConfig,
-    site_display_name: &str,
+    site: &dyn Site,
     display_title: &str,
     snapshot: &SeriesSnapshot,
     decision: Decision,
@@ -556,6 +727,7 @@ async fn apply_decision(
     options: CheckOptions,
 ) -> SingleSeriesOutcome {
     let state_key = series_cfg.key.as_state_key();
+    let site_display_name = site.display_name();
     let head_label = snapshot
         .chapters_newest_first
         .first()
@@ -717,6 +889,8 @@ async fn apply_decision(
                 );
                 if !options.dry_run {
                     let entry = state.series.entry(state_key.clone()).or_default();
+                    entry.last_error =
+                        Some(sanitize_error(&format!("Page looked wrong: {reason}")));
                     entry.consecutive_anomalies = current_anomalies;
                     // Re-evaluate the page next cycle instead of accepting a 304 for it.
                     entry.etag = None;
@@ -809,7 +983,29 @@ async fn apply_decision(
                 };
             }
 
+            // A series that already has a baseline records what it found right away, so the
+            // release shelf shows it even while Discord delivery is failing. Detection is
+            // idempotent: retries only ever see the same, still-unannounced chapters.
+            // A series without a baseline (`--announce-on-first-run`) is recorded only once
+            // its group is delivered, so a failed first announcement is not shown as unread.
+            let initialized = !was_uninitialized;
+            if initialized {
+                let releases = groups
+                    .iter()
+                    .filter_map(|g| release_from_group(site, series_cfg, g, now_unix));
+                let entry = state.series.entry(state_key.clone()).or_default();
+                if entry.record_discovered(releases) {
+                    let _ = persist_state_if_needed(state, state_path, false);
+                }
+            }
+
             let Some(ref webhook) = series_cfg.webhook else {
+                note_series_error(
+                    state,
+                    state_path,
+                    &state_key,
+                    "No updates webhook is set. Add it in Settings.",
+                );
                 return SingleSeriesOutcome {
                     exit_code: ExitCode::ConfigOrStateError,
                     failure_kind: Some(FailureKind::Other),
@@ -830,6 +1026,12 @@ async fn apply_decision(
                 tracing::warn!(
                     series = %state_key,
                     "skipping announcement because webhook was previously rejected as deleted/revoked"
+                );
+                note_series_error(
+                    state,
+                    state_path,
+                    &state_key,
+                    "The updates webhook was revoked. Replace it in Settings.",
                 );
                 return SingleSeriesOutcome {
                     exit_code: ExitCode::WebhookError,
@@ -910,6 +1112,11 @@ async fn apply_decision(
                         let group_ids: Vec<String> =
                             group.parts.iter().map(|p| p.id.clone()).collect();
                         entry.record_announced_ids(group_ids, &current_snap_ids);
+                        if !initialized {
+                            entry.record_discovered(release_from_group(
+                                site, series_cfg, group, now_unix,
+                            ));
+                        }
                         if let Some(last_part) = group.parts.last() {
                             entry.last_announced_label = Some(last_part.label.clone());
                         }
@@ -947,10 +1154,13 @@ async fn apply_decision(
             if let Some(entry) = state.series.get_mut(&state_key) {
                 entry.last_snapshot_len = snapshot.chapters_newest_first.len();
                 entry.consecutive_anomalies = 0;
-                if post_error.is_some() {
+                if let Some(reason) = &post_error {
                     // Undelivered chapters must be retried next cycle: drop the ETag so the
                     // next fetch is a full GET instead of a 304 that would skip `decide()`.
                     entry.etag = None;
+                    entry.last_error = Some(sanitize_error(&format!(
+                        "Discord delivery failed: {reason}"
+                    )));
                 }
             }
             state_save_code =
@@ -1092,6 +1302,8 @@ async fn handle_recovery_if_needed(
         entry.last_checked_unix = Some(now_unix);
         entry.last_success_unix = Some(now_unix);
         entry.etag = response_etag;
+        entry.last_error = None;
+        entry.retry_not_before_unix = None;
         if had_alert {
             entry.alert_sent = false;
         }
@@ -1152,6 +1364,67 @@ async fn send_webhook_gone_health_alert(
         }
         tracing::error!(error = %err, "failed to send WebhookGone alert to health webhook");
     }
+}
+
+/// Seconds a single-title retry must still wait, or `None` when a retry is allowed now.
+#[must_use]
+pub fn retry_wait_secs(state: &SeriesState, now_unix: i64) -> Option<i64> {
+    let after_last_check = state.last_checked_unix.map(|t| t + RETRY_COOLDOWN_SECS);
+    let after_block = state.retry_not_before_unix;
+    let until = after_last_check.max(after_block)?;
+    (until > now_unix).then_some(until - now_unix)
+}
+
+/// Official link recorded for a chapter: its own page if the provider vouches for it,
+/// otherwise the provider's series page.
+fn official_release_url(
+    site: &dyn Site,
+    series_cfg: &SeriesConfig,
+    chapter: &ChapterRef,
+) -> String {
+    reqwest::Url::parse(chapter.url.trim())
+        .ok()
+        .filter(|url| site.is_official_url(url))
+        .unwrap_or_else(|| series_cfg.fetch_url.clone())
+        .to_string()
+}
+
+/// Builds the persisted record for a detected chapter group.
+fn release_from_group(
+    site: &dyn Site,
+    series_cfg: &SeriesConfig,
+    group: &ChapterGroup,
+    now_unix: i64,
+) -> Option<DiscoveredRelease> {
+    let newest = group.parts.last()?;
+    Some(DiscoveredRelease {
+        id: newest.id.clone(),
+        label: crate::notify::discord::truncate_chars(
+            &crate::notify::discord::strip_control_chars(newest.label.trim()),
+            120,
+        ),
+        subtitle: newest
+            .subtitle
+            .as_deref()
+            .map(|s| {
+                crate::notify::discord::truncate_chars(
+                    &crate::notify::discord::strip_control_chars(s.trim()),
+                    160,
+                )
+            })
+            .filter(|s| !s.is_empty()),
+        url: official_release_url(site, series_cfg, newest),
+        part_ids: group.parts.iter().map(|p| p.id.clone()).collect(),
+        discovered_unix: now_unix,
+    })
+}
+
+/// Stores a display-safe failure reason for a series and persists it.
+fn note_series_error(state: &mut StateFile, state_path: &Path, state_key: &str, reason: &str) {
+    if let Some(entry) = state.series.get_mut(state_key) {
+        entry.last_error = Some(sanitize_error(reason));
+    }
+    let _ = persist_state_if_needed(state, state_path, false);
 }
 
 fn persist_state_if_needed(state: &StateFile, state_path: &Path, dry_run: bool) -> ExitCode {
@@ -1272,6 +1545,7 @@ pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) 
                 state_path,
                 &mut gone_webhooks,
                 CheckOptions::default(),
+                false,
             );
 
             let outcome = tokio::select! {

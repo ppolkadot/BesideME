@@ -57,11 +57,12 @@ impl Light {
         }
     }
 
-    fn tooltip(self) -> &'static str {
+    /// Accessible name announced by screen readers (also shown as the tooltip).
+    fn name(self) -> &'static str {
         match self {
-            Self::Close => "Close",
-            Self::Minimize => "Minimize",
-            Self::Zoom => "Zoom",
+            Self::Close => "Close window",
+            Self::Minimize => "Minimize window",
+            Self::Zoom => "Zoom window",
         }
     }
 }
@@ -71,7 +72,8 @@ pub fn title_bar(ui: &mut Ui, title: &str, maximized: bool) -> TitleBarResponse 
     let mut out = TitleBarResponse::default();
     let (bar_rect, bar) = ui.allocate_exact_size(
         vec2(ui.available_width(), TITLE_BAR_HEIGHT),
-        Sense::click_and_drag(),
+        // Draggable and double-clickable, but not a keyboard stop: the traffic lights are.
+        Sense::CLICK | Sense::DRAG,
     );
     let painter = ui.painter_at(bar_rect);
 
@@ -79,7 +81,7 @@ pub fn title_bar(ui: &mut Ui, title: &str, maximized: bool) -> TitleBarResponse 
         bar_rect.center(),
         egui::Align2::CENTER_CENTER,
         title,
-        egui::FontId::proportional(13.5),
+        egui::FontId::new(13.5, theme::title_family()),
         theme::TEXT_SECONDARY,
     );
     painter.line_segment(
@@ -109,13 +111,17 @@ pub fn title_bar(ui: &mut Ui, title: &str, maximized: bool) -> TitleBarResponse 
             center,
             vec2(LIGHT_RADIUS * 2.0 + 3.0, LIGHT_RADIUS * 2.0 + 3.0),
         );
+        // A stable id (not `Id::unique`) so keyboard focus survives from frame to frame.
         let resp = ui
             .interact(
                 hit,
                 egui::Id::unique(("traffic-light", light as u8)),
                 Sense::click(),
             )
-            .on_hover_text(light.tooltip());
+            .on_hover_text(light.name());
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), light.name())
+        });
 
         let active = focused || group_hovered;
         let (mut fill, rim) = if active {
@@ -127,7 +133,8 @@ pub fn title_bar(ui: &mut Ui, title: &str, maximized: bool) -> TitleBarResponse 
             fill = fill.gamma_multiply(0.75);
         }
         painter.circle(center, LIGHT_RADIUS, fill, Stroke::new(0.8, rim));
-        if group_hovered {
+        // Glyphs show on hover and whenever a light has keyboard focus.
+        if group_hovered || resp.has_focus() {
             draw_glyph(&painter, light, center, maximized);
         }
 
@@ -204,4 +211,33 @@ pub fn window_radius(maximized: bool) -> CornerRadius {
     } else {
         CornerRadius::same(12)
     }
+}
+
+/// Draws a clear ring around whichever control currently has keyboard focus.
+///
+/// egui's own focus styling is subtle on a dark canvas and custom-painted controls (the
+/// traffic lights) have none, so one ring is painted above everything for all of them.
+pub fn paint_focus_ring(ctx: &egui::Context) {
+    let Some(id) = ctx.memory(egui::Memory::focused) else {
+        return;
+    };
+    let Some(response) = ctx.read_response(id) else {
+        return;
+    };
+    if !response.has_focus() {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::unique("focus-ring"),
+    ));
+    let rect = response.rect.expand(2.0);
+    // Round rings for the round traffic lights, softly rounded ones for everything else.
+    let radius = if rect.width() <= 24.0 { 12 } else { 10 };
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        Stroke::new(2.0, theme::FOCUS_RING),
+        egui::StrokeKind::Outside,
+    );
 }

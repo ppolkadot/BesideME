@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    DEFAULT_WEBHOOK_ENV, HEALTH_WEBHOOK_ENV, WebhookUrl, file_webhook_value, legacy_webhook_key,
-    parse_dotenv_file, process_webhook_value,
+    DEFAULT_WEBHOOK_ENV, HEALTH_WEBHOOK_ENV, WebhookUrl, allow_any_webhook_from_env,
+    file_webhook_value, legacy_webhook_key, parse_dotenv_file, process_webhook_value,
 };
 use crate::paths::resolve_env_file_path;
 
@@ -16,14 +16,24 @@ pub struct WebhookField {
     pub value: String,
     /// Whether the launch environment takes precedence.
     pub overridden: bool,
+    key: &'static str,
 }
 
 impl WebhookField {
-    fn load(vars: &BTreeMap<String, String>, key: &str) -> Self {
+    fn load(vars: &BTreeMap<String, String>, key: &'static str) -> Self {
         Self {
             value: file_webhook_value(vars, key).unwrap_or_default(),
             overridden: process_webhook_value(key).is_some(),
+            key,
         }
+    }
+
+    /// The value the checker would use: the launch environment's, or else the edited text.
+    ///
+    /// Callers must never log or display it.
+    #[must_use]
+    pub fn effective_value(&self) -> String {
+        process_webhook_value(self.key).unwrap_or_else(|| self.value.clone())
     }
 }
 
@@ -112,7 +122,7 @@ fn validate(key: &str, value: &str) -> Result<WebhookUrl, String> {
     if value.trim().chars().any(char::is_whitespace) {
         return Err("Paste a single Discord webhook URL without spaces.".into());
     }
-    WebhookUrl::parse(key, value, false).map_err(|e| e.to_string())
+    WebhookUrl::parse(key, value, allow_any_webhook_from_env()).map_err(|e| e.to_string())
 }
 
 fn read_vars(path: &Path) -> Result<BTreeMap<String, String>, String> {
@@ -166,10 +176,12 @@ mod tests {
             updates: WebhookField {
                 value: "https://discord.com/api/webhooks/123/test_token".into(),
                 overridden: false,
+                key: DEFAULT_WEBHOOK_ENV,
             },
             health: WebhookField {
                 value: String::new(),
                 overridden: false,
+                key: HEALTH_WEBHOOK_ENV,
             },
         };
         assert!(settings.save().is_ok());

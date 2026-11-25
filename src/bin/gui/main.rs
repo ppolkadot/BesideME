@@ -9,9 +9,14 @@
 
 mod app;
 mod chrome;
+mod data;
+mod quick_add;
 mod settings;
+mod shelf;
+mod status;
 mod tasks;
 mod theme;
+mod widgets;
 
 use besideme::paths::resolve_log_dir;
 use eframe::egui;
@@ -77,7 +82,7 @@ fn main() {
         .with_title("BesideME")
         .with_app_id("BesideME")
         .with_inner_size([720.0, 680.0])
-        .with_min_inner_size([560.0, 520.0])
+        .with_min_inner_size([420.0, 420.0])
         // No native caption: no Windows minimize/maximize/close buttons to interact with.
         .with_decorations(false)
         .with_transparent(true)

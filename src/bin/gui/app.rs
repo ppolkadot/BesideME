@@ -1,53 +1,61 @@
-//! The `BesideME` window: list watched manga, add by name search or by link, remove,
-//! and run a check on demand.
+//! The `BesideME` window: a release shelf of the manga you follow, a status strip, Quick Add,
+//! and Discord settings.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::Duration;
 
 use besideme::config_edit::{
-    self, EditError, add_series, gui_config_path, list_series, read_or_default, remove_series,
-    validate_and_write,
+    EditError, add_series, gui_config_path, read_or_default, remove_series, validate_and_write,
 };
-use besideme::lookup::SeriesPreview;
 use besideme::model::SeriesKey;
 use besideme::paths::resolve_state_path;
-use besideme::sites::{CatalogEntry, Registry, search_catalog};
-use besideme::state::{InstanceLock, StateFile};
+use besideme::reads::{ReadMarkers, reads_path_for_state};
+use besideme::sites::{CatalogEntry, Registry};
+use besideme::state::{InstanceLock, RunPhase, RunRecord, StateFile};
+use besideme::watcher::CheckProgress;
 use besideme::webhook_settings::WebhookSettings;
 use eframe::egui::{
-    self, Align, Button, Color32, CornerRadius, Frame, Image, Key, Layout, Margin, RichText,
-    ScrollArea, Stroke, TextEdit, Ui, ViewportCommand, vec2,
+    self, Align, Frame, Id, Key, Layout, Modifiers, ProgressBar, RichText, ScrollArea, Stroke, Ui,
+    ViewportCommand, vec2,
 };
 
 use crate::chrome;
+use crate::data::{self, FileStamps, Filter, Loadable, Paths, Row};
+use crate::quick_add::{self, QuickAdd};
 use crate::settings::{Settings, SettingsAction};
+use crate::shelf::{self, ShelfAction, ShelfEnv};
+use crate::status::{self, TaskView, Tone};
 use crate::tasks::{self, Msg};
 use crate::theme;
+use crate::widgets::{banner, card, pill, primary, segmented, title_text};
 
-const COVER: egui::Vec2 = egui::Vec2::new(80.0, 45.0); // Manga UP! list art is 16:9
 const STATUS_SECONDS: f64 = 8.0;
+/// How often the window looks for files written by the scheduled check.
+const POLL_SECONDS: f64 = 1.5;
+/// How often the Windows task status is asked for again.
+const TASK_REFRESH_SECONDS: f64 = 60.0;
+/// Largest and preferred window size, in points. Smaller screens get a smaller window.
+const WINDOW: egui::Vec2 = egui::vec2(720.0, 680.0);
+/// Body height (points) below which the whole page scrolls as one.
+const CRAMPED_HEIGHT: f32 = 400.0;
+/// Room reserved for the Add manga and Settings buttons.
+const TOOLBAR_BUTTONS_WIDTH: f32 = 200.0;
+/// Width (points) below which the toolbar wraps instead of right-aligning its buttons.
+const NARROW_WIDTH: f32 = 520.0;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum Tab {
-    Search,
-    Link,
-}
-
-enum Loadable<T> {
+#[derive(PartialEq, Eq, Clone)]
+enum Busy {
     Idle,
-    Loading,
-    Ready(T),
-    Failed(String),
+    Full,
+    Retry(SeriesKey),
 }
 
-struct WatchedRow {
-    key: SeriesKey,
-    url: String,
-    title: String,
-    last_label: Option<String>,
-    last_success: Option<i64>,
-    failures: u32,
+struct Progress {
+    done: usize,
+    total: usize,
+    current: Option<String>,
 }
 
 struct Status {
@@ -56,24 +64,38 @@ struct Status {
     at: f64,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct WatcherApp {
     registry: Registry,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
-    config_path: PathBuf,
-    watched: Vec<WatchedRow>,
+    paths: Paths,
+    stamps: FileStamps,
+    next_poll: f64,
+    rows: Vec<Row>,
+    last_run: Option<RunRecord>,
+    config_error: Option<String>,
     catalog: Loadable<Vec<CatalogEntry>>,
-    tab: Tab,
-    query: String,
-    link: String,
-    preview: Loadable<SeriesPreview>,
-    checking: bool,
+    catalog_generation: u64,
+    catalog_titles: HashMap<String, String>,
+    covers: HashMap<String, String>,
+    filter: Filter,
+    quick: QuickAdd,
+    busy: Busy,
+    progress: Option<Progress>,
+    task: TaskView,
+    task_asked_at: f64,
+    task_inflight: bool,
     status: Option<Status>,
     confirm_remove: Option<(SeriesKey, f64)>,
     webhook_missing: bool,
     settings: Option<Settings>,
     /// Set only by the red traffic light; every other close request is cancelled.
     allow_close: bool,
+    fitted: bool,
+    /// Title whose "Open series" button should get keyboard focus (and for how many more frames).
+    focus_anchor: Option<(SeriesKey, u8)>,
+    add_button_id: Option<Id>,
 }
 
 impl WatcherApp {
@@ -81,107 +103,136 @@ impl WatcherApp {
         theme::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let (tx, rx) = channel();
+        let config = {
+            let p = gui_config_path();
+            std::path::absolute(&p).unwrap_or(p)
+        };
+        let state = resolve_state_path(None).unwrap_or_else(|_| PathBuf::from("state.json"));
+        let paths = Paths {
+            reads: reads_path_for_state(&state),
+            state,
+            config,
+        };
         let mut app = Self {
             registry: Registry::with_defaults(),
             tx,
             rx,
-            config_path: PathBuf::new(),
-            watched: Vec::new(),
+            paths,
+            stamps: FileStamps::default(),
+            next_poll: 0.0,
+            rows: Vec::new(),
+            last_run: None,
+            config_error: None,
             catalog: Loadable::Idle,
-            tab: Tab::Search,
-            query: String::new(),
-            link: String::new(),
-            preview: Loadable::Idle,
-            checking: false,
+            catalog_generation: 0,
+            catalog_titles: HashMap::new(),
+            covers: HashMap::new(),
+            filter: Filter::All,
+            quick: QuickAdd::new(),
+            busy: Busy::Idle,
+            progress: None,
+            task: TaskView::Loading,
+            task_asked_at: f64::NEG_INFINITY,
+            task_inflight: false,
             status: None,
             confirm_remove: None,
             webhook_missing: false,
             settings: None,
             allow_close: false,
+            fitted: false,
+            focus_anchor: None,
+            add_button_id: None,
         };
-        app.refresh();
+        app.reload();
         app.start_catalog(&cc.egui_ctx);
         app
     }
 
     // ---------------------------------------------------------------- data
 
-    fn refresh(&mut self) {
-        let p = gui_config_path();
-        self.config_path = std::path::absolute(&p).unwrap_or(p);
-        let text = read_or_default(&self.config_path).unwrap_or_default();
-        let listed = match list_series(&text, &self.registry) {
-            Ok(l) => l,
-            Err(e) => {
-                self.set_status(None, format!("config.toml problem: {e}"), true);
-                Vec::new()
-            }
-        };
-        let state = resolve_state_path(None)
-            .ok()
-            .and_then(|p| StateFile::load(&p).ok())
-            .unwrap_or_default();
-        let catalog_titles: HashMap<&str, &str> = match &self.catalog {
-            Loadable::Ready(c) => c
-                .iter()
-                .map(|e| (e.key.as_str(), e.title.as_str()))
-                .collect(),
-            _ => HashMap::new(),
-        };
-        self.watched = listed
-            .into_iter()
-            .map(|s| {
-                let st = state.series.get(&s.key.as_state_key());
-                let title = s
-                    .label
-                    .clone()
-                    .or_else(|| {
-                        catalog_titles
-                            .get(s.key.key.as_str())
-                            .map(ToString::to_string)
-                    })
-                    .or(s.comment_title.clone())
-                    .unwrap_or_else(|| format!("Manga #{}", s.key.key));
-                WatchedRow {
-                    title,
-                    url: s.url,
-                    last_label: st.and_then(|x| x.last_announced_label.clone()),
-                    last_success: st.and_then(|x| x.last_success_unix),
-                    failures: st.map_or(0, |x| x.consecutive_failures),
-                    key: s.key,
-                }
-            })
-            .collect();
-
-        self.webhook_missing = !WebhookSettings::load(&self.config_path)
+    fn reload(&mut self) {
+        let snapshot = data::load(
+            &self.registry,
+            &self.paths,
+            &self.catalog_titles,
+            time_now_unix(),
+        );
+        self.rows = snapshot.rows;
+        self.last_run = snapshot.last_run;
+        self.config_error = snapshot.config_error;
+        self.stamps = FileStamps::read(&self.paths.config, &self.paths.state, &self.paths.reads);
+        self.webhook_missing = !WebhookSettings::load(&self.paths.config)
             .is_ok_and(|settings| settings.updates_configured());
+        if let Some(error) = self.config_error.clone() {
+            self.status = Some(Status {
+                text: error,
+                error: true,
+                at: 0.0,
+            });
+        }
     }
 
-    fn is_watched(&self, key: &SeriesKey) -> bool {
-        self.watched.iter().any(|w| &w.key == key)
+    /// Picks up changes made by the scheduled check (or another window) without a restart.
+    fn poll_files(&mut self, now: f64) {
+        if now < self.next_poll {
+            return;
+        }
+        self.next_poll = now + POLL_SECONDS;
+        let current = FileStamps::read(&self.paths.config, &self.paths.state, &self.paths.reads);
+        if current != self.stamps {
+            self.reload();
+        }
+    }
+
+    fn title_of(&self, series_key: &str) -> String {
+        self.rows
+            .iter()
+            .find(|r| r.key.as_state_key() == series_key)
+            .map_or_else(|| series_key.to_owned(), |r| r.title.clone())
     }
 
     fn start_catalog(&mut self, ctx: &egui::Context) {
         self.catalog = Loadable::Loading;
-        tasks::spawn(ctx, &self.tx, tasks::load_catalog);
+        self.catalog_generation += 1;
+        let generation = self.catalog_generation;
+        tasks::spawn(ctx, &self.tx, move || tasks::load_catalog(generation));
     }
 
-    fn start_check(&mut self, ctx: &egui::Context) {
-        if self.checking {
+    fn external_check_running(&self) -> bool {
+        self.last_run
+            .as_ref()
+            .is_some_and(|r| r.phase(time_now_unix()) == RunPhase::Running)
+    }
+
+    /// Whether this window is already running a check. A run by another process only shows
+    /// in the status strip: the instance lock refuses an overlapping one with a clear message,
+    /// and a check that was killed mid-run must not leave the button disabled.
+    fn checks_blocked(&self) -> bool {
+        self.busy != Busy::Idle
+    }
+
+    fn start_check(&mut self, ctx: &egui::Context, only: Option<SeriesKey>) {
+        if self.checks_blocked() {
             return;
         }
-        self.checking = true;
-        tasks::spawn(ctx, &self.tx, tasks::check_now);
+        self.busy = only.clone().map_or(Busy::Full, Busy::Retry);
+        self.progress = Some(Progress {
+            done: 0,
+            total: if only.is_some() { 1 } else { self.rows.len() },
+            current: None,
+        });
+        tasks::spawn_check(ctx, &self.tx, only);
     }
 
-    fn add(&mut self, ctx: &egui::Context, url: &str, title: &str) {
-        let result = read_or_default(&self.config_path).and_then(|text| {
+    /// Adds a series to the watchlist. Returns whether it is now watched.
+    fn add(&mut self, ctx: &egui::Context, url: &str, title: &str) -> bool {
+        let result = read_or_default(&self.paths.config).and_then(|text| {
             let new = add_series(&text, &self.registry, url, Some(title))?;
-            validate_and_write(&new, &self.config_path, &self.registry)
+            validate_and_write(&new, &self.paths.config, &self.registry)
         });
         match result {
             Ok(()) => {
-                self.refresh();
+                self.reload();
                 if self.webhook_missing {
                     self.set_status(
                         Some(ctx),
@@ -190,9 +241,10 @@ impl WatcherApp {
                     );
                 } else {
                     self.set_status(Some(ctx), format!("Added {title}. Setting it up…"), false);
-                    // Silent baseline right away, so the app shows the latest chapter.
-                    self.start_check(ctx);
+                    // Silent baseline right away, so the shelf shows the latest chapter.
+                    self.start_check(ctx, None);
                 }
+                true
             }
             Err(EditError::AlreadyPresent) => {
                 self.set_status(
@@ -200,23 +252,51 @@ impl WatcherApp {
                     format!("{title} is already being watched."),
                     false,
                 );
+                true
             }
-            Err(e) => self.set_status(Some(ctx), format!("Couldn't add: {e}"), true),
+            Err(e) => {
+                self.set_status(Some(ctx), format!("Couldn't add: {e}"), true);
+                false
+            }
         }
     }
 
     fn remove(&mut self, ctx: &egui::Context, key: &SeriesKey, title: &str) {
-        let result = read_or_default(&self.config_path).and_then(|text| {
+        let result = read_or_default(&self.paths.config).and_then(|text| {
             let new = remove_series(&text, &self.registry, key)?;
-            validate_and_write(&new, &self.config_path, &self.registry)
+            validate_and_write(&new, &self.paths.config, &self.registry)
         });
         match result {
             Ok(()) => {
                 forget_state(key);
-                self.refresh();
+                let state_key = key.as_state_key();
+                let _ = ReadMarkers::update(&self.paths.reads, |m| {
+                    m.forget(&state_key);
+                });
+                self.reload();
                 self.set_status(Some(ctx), format!("Stopped watching {title}."), false);
             }
             Err(e) => self.set_status(Some(ctx), format!("Couldn't remove: {e}"), true),
+        }
+    }
+
+    fn mark_read(&mut self, ctx: &egui::Context, key: &SeriesKey) {
+        let Some(row) = self.rows.iter().find(|r| &r.key == key) else {
+            return;
+        };
+        let title = row.title.clone();
+        let ids: Vec<String> = row.unread.iter().map(|u| u.id.clone()).collect();
+        let state_key = key.as_state_key();
+        // Only the read-marker file is written, so a running check is never in the way.
+        match ReadMarkers::update(&self.paths.reads, |m| {
+            m.mark_read(&state_key, ids.iter().map(String::as_str));
+        }) {
+            Ok(()) => {
+                self.focus_anchor = Some((key.clone(), 3));
+                self.reload();
+                self.set_status(Some(ctx), format!("Marked {title} as read."), false);
+            }
+            Err(e) => self.set_status(Some(ctx), format!("Couldn't mark as read: {e}"), true),
         }
     }
 
@@ -228,23 +308,85 @@ impl WatcherApp {
     fn poll_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Catalog(Ok(c)) => {
-                    self.catalog = Loadable::Ready(c);
-                    self.refresh();
+                Msg::Catalog { generation, result } => {
+                    if generation != self.catalog_generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(catalog) => {
+                            self.catalog_titles = catalog
+                                .iter()
+                                .map(|e| (e.key.clone(), e.title.clone()))
+                                .collect();
+                            self.covers = catalog
+                                .iter()
+                                .filter_map(|e| e.cover.clone().map(|u| (e.key.clone(), u)))
+                                .collect();
+                            self.catalog = Loadable::Ready(catalog);
+                            self.reload();
+                        }
+                        Err(e) => self.catalog = Loadable::Failed(e),
+                    }
                 }
-                Msg::Catalog(Err(e)) => self.catalog = Loadable::Failed(e),
-                Msg::Preview(r) => {
-                    self.preview = match r {
-                        Ok(p) => Loadable::Ready(p),
-                        Err(e) => Loadable::Failed(e),
-                    };
+                Msg::Preview {
+                    generation,
+                    input,
+                    result,
+                } => {
+                    self.quick.accept_preview(generation, &input, result);
                 }
+                Msg::Progress(event) => self.apply_progress(&event),
                 Msg::Check(out) => {
-                    self.checking = false;
-                    self.refresh();
-                    self.set_status(Some(ctx), out.message, !out.ok);
+                    self.busy = Busy::Idle;
+                    self.progress = None;
+                    self.reload();
+                    self.task_asked_at = f64::NEG_INFINITY; // refresh the Windows task soon
+                    // Reports name series by key; show their titles instead.
+                    let mut message = out.message;
+                    for row in &self.rows {
+                        message = message.replace(&row.key.as_state_key(), &row.title);
+                    }
+                    self.set_status(Some(ctx), message, !out.ok);
+                }
+                Msg::Schedule(status) => {
+                    self.task_inflight = false;
+                    self.task = TaskView::Known(status);
                 }
             }
+        }
+    }
+
+    fn apply_progress(&mut self, event: &CheckProgress) {
+        let current = match event {
+            CheckProgress::SeriesStarted { series_key, .. } => Some(self.title_of(series_key)),
+            _ => None,
+        };
+        let Some(progress) = self.progress.as_mut() else {
+            return;
+        };
+        match event {
+            CheckProgress::Started { total } => progress.total = *total,
+            CheckProgress::SeriesStarted { index, total, .. } => {
+                progress.done = *index;
+                progress.total = *total;
+                progress.current = current;
+            }
+            CheckProgress::SeriesFinished { index, total, .. } => {
+                progress.done = index + 1;
+                progress.total = *total;
+            }
+        }
+    }
+
+    fn refresh_task(&mut self, ctx: &egui::Context, now: f64) {
+        if cfg!(not(windows)) {
+            self.task = TaskView::Known(besideme::schedule::TaskStatus::Unsupported);
+            return;
+        }
+        if !self.task_inflight && now - self.task_asked_at >= TASK_REFRESH_SECONDS {
+            self.task_inflight = true;
+            self.task_asked_at = now;
+            tasks::query_schedule(ctx, &self.tx);
         }
     }
 
@@ -256,24 +398,67 @@ impl WatcherApp {
         }
     }
 
+    /// Shrinks the window on small or heavily scaled screens so it never opens off-screen.
+    fn fit_to_monitor(&mut self, ctx: &egui::Context) {
+        if self.fitted {
+            return;
+        }
+        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
+            return;
+        };
+        self.fitted = true;
+        let target = vec2(
+            WINDOW.x.min(monitor.x * 0.94),
+            WINDOW.y.min(monitor.y * 0.86),
+        )
+        .max(vec2(420.0, 420.0));
+        let current = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+        if current.is_none_or(|c| (c - target).abs().max_elem() > 1.0) {
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(target));
+            ctx.send_viewport_cmd(
+                ViewportCommand::center_on_screen(ctx).unwrap_or(ViewportCommand::Focus),
+            );
+        }
+    }
+
     // ---------------------------------------------------------------- ui
 
     fn body(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
 
         if let Some(settings) = &mut self.settings {
-            match settings.show(ui) {
+            // Scrolls on small or heavily zoomed windows so Save stays reachable.
+            let action = ScrollArea::vertical()
+                .id_salt("settings")
+                .auto_shrink([false, false])
+                .show(ui, |ui| settings.show(ui))
+                .inner;
+            match action {
                 SettingsAction::Stay => {}
                 SettingsAction::Back => self.settings = None,
                 SettingsAction::Saved => {
                     self.settings = None;
-                    self.refresh();
+                    self.reload();
                     self.set_status(Some(&ctx), "Discord settings saved.".into(), false);
                 }
             }
             return;
         }
 
+        // Normally the status strip and filters stay put and the shelf takes the rest of
+        // the window. When there is hardly any height (small screens, large zoom) the
+        // whole page scrolls instead, so nothing is ever clipped or overlapped.
+        if ui.available_height() < CRAMPED_HEIGHT {
+            ScrollArea::vertical()
+                .id_salt("page")
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.page(ui, &ctx, false));
+        } else {
+            self.page(ui, &ctx, true);
+        }
+    }
+
+    fn page(&mut self, ui: &mut Ui, ctx: &egui::Context, scroll_shelf: bool) {
         if self.webhook_missing {
             banner(
                 ui,
@@ -281,352 +466,293 @@ impl WatcherApp {
             );
         }
 
-        // ---- Watching
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Watching").heading().strong());
-            ui.label(
-                RichText::new(self.watched.len().to_string())
-                    .color(theme::TEXT_SECONDARY)
-                    .heading(),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(pill("Settings", false)).clicked() {
-                    self.settings = Some(Settings::new(&self.config_path));
-                }
-                let label = if self.checking { "Checking…" } else { "Check now" };
-                let btn = ui
-                    .add_enabled(!self.checking && !self.watched.is_empty(), pill(label, false))
-                    .on_hover_text("Look for new chapters now (the background task also does this every 30 minutes)");
-                if self.checking {
-                    ui.add(egui::Spinner::new().size(16.0));
-                }
-                if btn.clicked() {
-                    self.start_check(&ctx);
-                }
-            });
-        });
+        self.status_strip(ui, ctx);
+        ui.add_space(theme::GRID);
+        self.toolbar(ui, ctx);
+        ui.add_space(theme::GRID);
+        self.shelf(ui, ctx, scroll_shelf);
+    }
 
-        let now_unix = time_now_unix();
+    fn status_strip(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let now = time_now_unix();
+        let (last, last_tone) = status::last_check_line(self.last_run.as_ref(), &self.rows, now);
+        let schedule = status::schedule_line(&self.task, now);
+        let external = self.external_check_running();
+        let blocked = self.checks_blocked();
+        let mut check_clicked = false;
+
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Leave room for the button so long lines wrap instead of running under it.
+                let text_width = (ui.available_width() - 132.0).max(160.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width(text_width);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    tone_line(ui, &last, last_tone);
+                    if let Some((text, tone)) = &schedule {
+                        tone_line(ui, text, *tone);
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if self.busy == Busy::Full {
+                        "Checking…"
+                    } else {
+                        "Check now"
+                    };
+                    let button = ui
+                        .add_enabled(!blocked && !self.rows.is_empty(), primary(label))
+                        .on_hover_text(if external {
+                            "A background check seems to be running; if it is, this says so instead of starting another"
+                        } else {
+                            "Look for new chapters now"
+                        });
+                    button.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            !blocked && !self.rows.is_empty(),
+                            "Check all titles now",
+                        )
+                    });
+                    check_clicked = button.clicked();
+                });
+            });
+            if let Some(progress) = &self.progress {
+                ui.add_space(4.0);
+                #[allow(clippy::cast_precision_loss)]
+                let fraction = if progress.total == 0 {
+                    0.0
+                } else {
+                    progress.done as f32 / progress.total as f32
+                };
+                let what = progress
+                    .current
+                    .as_deref()
+                    .map_or_else(String::new, |t| format!(" · {t}"));
+                ui.add(
+                    ProgressBar::new(fraction)
+                        .desired_height(14.0)
+                        .corner_radius(7)
+                        .fill(theme::ACCENT)
+                        .text(
+                            RichText::new(format!(
+                                "Checking {} of {}{what}",
+                                (progress.done + 1).min(progress.total.max(1)),
+                                progress.total.max(1)
+                            ))
+                            .small()
+                            .color(theme::ON_ACCENT),
+                        ),
+                );
+            }
+        });
+        if check_clicked {
+            self.start_check(ctx, None);
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let counts = data::counts(&self.rows);
+        let options: Vec<(Filter, String)> = Filter::ALL
+            .iter()
+            .zip(counts)
+            .map(|(f, n)| (*f, format!("{} {n}", f.label())))
+            .collect();
+        let mut open_quick = false;
+        let mut open_settings = false;
+        let mut chosen = None;
+        let mut actions = |ui: &mut Ui, add_id: &mut Option<Id>| {
+            let add = ui
+                .add(primary("Add manga"))
+                .on_hover_text("Search by title or paste a link (Ctrl+K)");
+            add.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, "Add manga, shortcut Control K")
+            });
+            *add_id = Some(add.id);
+            open_quick = add.clicked();
+            if ui.add(pill("Settings")).clicked() {
+                open_settings = true;
+            }
+        };
+        if ui.available_width() < NARROW_WIDTH {
+            // Narrow: everything flows left to right and wraps.
+            ui.horizontal_wrapped(|ui| {
+                chosen = segmented(ui, self.filter, &options);
+                actions(ui, &mut self.add_button_id);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                chosen = segmented(ui, self.filter, &options);
+                // Right-aligned, but laid out left to right so Tab follows the visual order.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(TOOLBAR_BUTTONS_WIDTH, 32.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| actions(ui, &mut self.add_button_id),
+                    );
+                });
+            });
+        }
+        if let Some(f) = chosen {
+            self.filter = f;
+        }
+        if open_quick {
+            self.quick.open(ctx);
+        }
+        if open_settings {
+            self.settings = Some(Settings::new(&self.paths.config));
+        }
+    }
+
+    fn shelf(&mut self, ui: &mut Ui, ctx: &egui::Context, scroll: bool) {
         let now = ctx.input(|i| i.time);
         if let Some((_, t)) = &self.confirm_remove
             && now - t > 4.0
         {
             self.confirm_remove = None;
         }
-        let mut remove_clicked: Option<(SeriesKey, String)> = None;
 
-        card(ui, |ui| {
-            if self.watched.is_empty() {
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("No manga yet. Search for one below or paste its link.")
-                        .color(theme::TEXT_SECONDARY),
-                );
-                ui.add_space(6.0);
-                return;
-            }
+        let visible: Vec<&Row> = self
+            .rows
+            .iter()
+            .filter(|r| self.filter.matches(r))
+            .collect();
+        if visible.is_empty() {
+            self.empty_state(ui, ctx);
+            return;
+        }
+
+        let env = ShelfEnv {
+            now_unix: time_now_unix(),
+            covers: &self.covers,
+            confirm_remove: self.confirm_remove.as_ref().map(|(k, _)| k),
+            busy: self.checks_blocked(),
+            retrying: match &self.busy {
+                Busy::Retry(k) => Some(k),
+                _ => None,
+            },
+            focus_anchor: self.focus_anchor.as_ref().map(|(k, _)| k),
+        };
+        let actions = if scroll {
             ScrollArea::vertical()
-                .id_salt("watched")
-                .max_height(176.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    let covers = self.cover_map();
-                    for (i, row) in self.watched.iter().enumerate() {
-                        if i > 0 {
-                            ui.separator();
-                        }
-                        ui.horizontal(|ui| {
-                            cover(ui, covers.get(&row.key.key).map(String::as_str));
-                            let text_w = (ui.available_width() - 190.0).max(120.0);
-                            ui.allocate_ui_with_layout(
-                                vec2(text_w, COVER.y + 8.0),
-                                Layout::top_down(Align::Min),
-                                |ui| {
-                                    ui.set_width(text_w);
-                                    ui.add_space(2.0);
-                                    ui.add(
-                                        egui::Label::new(RichText::new(&row.title).strong())
-                                            .truncate(),
-                                    )
-                                    .on_hover_text(&row.title);
-                                    let detail = match (&row.last_label, row.last_success) {
-                                        (Some(l), Some(t)) => {
-                                            format!("Latest: {l} · checked {}", ago(now_unix - t))
-                                        }
-                                        (Some(l), None) => format!("Latest: {l}"),
-                                        _ => "Waiting for the first check".into(),
-                                    };
-                                    ui.label(
-                                        RichText::new(detail).small().color(theme::TEXT_SECONDARY),
-                                    );
-                                    if row.failures > 0 {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "⚠ last {} check(s) failed",
-                                                row.failures
-                                            ))
-                                            .small()
-                                            .color(theme::WARNING),
-                                        );
-                                    }
-                                },
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let confirming = self
-                                    .confirm_remove
-                                    .as_ref()
-                                    .is_some_and(|(k, _)| k == &row.key);
-                                let b = if confirming {
-                                    pill("Confirm remove", true)
-                                } else {
-                                    pill("Remove", false)
-                                };
-                                if ui.add(b).clicked() {
-                                    if confirming {
-                                        remove_clicked = Some((row.key.clone(), row.title.clone()));
-                                    } else {
-                                        self.confirm_remove = Some((row.key.clone(), now));
-                                    }
-                                }
-                                if ui
-                                    .add(
-                                        Button::new(RichText::new("Open ↗").color(theme::ACCENT))
-                                            .frame(false),
-                                    )
-                                    .on_hover_text(&row.url)
-                                    .clicked()
-                                {
-                                    ctx.open_url(egui::OpenUrl::new_tab(&row.url));
-                                }
-                            });
-                        });
-                    }
-                });
-        });
-        if let Some((key, title)) = remove_clicked {
-            self.confirm_remove = None;
-            self.remove(&ctx, &key, &title);
+                .id_salt("shelf")
+                .auto_shrink([false, false])
+                .show(ui, |ui| shelf::draw(ui, &visible, &env))
+                .inner
+        } else {
+            shelf::draw(ui, &visible, &env)
+        };
+        // Request focus for a few frames: egui applies a request one frame later.
+        if let Some((_, frames)) = &mut self.focus_anchor {
+            ctx.request_repaint();
+            *frames = frames.saturating_sub(1);
+            if *frames == 0 {
+                self.focus_anchor = None;
+            }
         }
 
-        ui.add_space(10.0);
-
-        // ---- Add
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Add a manga").heading().strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                segmented(ui, &mut self.tab);
-            });
-        });
-
-        card(ui, |ui| match self.tab {
-            Tab::Search => self.search_tab(ui),
-            Tab::Link => self.link_tab(ui),
-        });
-    }
-
-    fn cover_map(&self) -> HashMap<String, String> {
-        match &self.catalog {
-            Loadable::Ready(c) => c
-                .iter()
-                .filter_map(|e| e.cover.clone().map(|u| (e.key.clone(), u)))
-                .collect(),
-            _ => HashMap::new(),
+        for action in actions {
+            match action {
+                ShelfAction::OpenUrl(url) => {
+                    let fallback = "https://global.manga-up.com/";
+                    let safe = data::official_or(&self.registry, &url, fallback);
+                    ctx.open_url(egui::OpenUrl::new_tab(safe));
+                }
+                ShelfAction::MarkRead(key) => self.mark_read(ctx, &key),
+                ShelfAction::Retry(key) => self.start_check(ctx, Some(key)),
+                ShelfAction::AskRemove(key) => self.confirm_remove = Some((key, now)),
+                ShelfAction::ConfirmRemove(key, title) => {
+                    self.confirm_remove = None;
+                    self.remove(ctx, &key, &title);
+                }
+            }
         }
     }
 
-    fn search_tab(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        ui.add(
-            TextEdit::singleline(&mut self.query)
-                .hint_text("Type a title, e.g. Smoking Behind the Supermarket")
-                .desired_width(f32::INFINITY)
-                .margin(Margin::symmetric(10, 8)),
-        );
-
-        let mut add: Option<(String, String)> = None;
-        match &self.catalog {
-            Loadable::Idle | Loadable::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new());
+    fn empty_state(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let mut open_quick = false;
+        let mut check = false;
+        let blocked = self.checks_blocked();
+        card(ui, |ui| {
+            ui.add_space(8.0);
+            match (self.rows.is_empty(), self.filter) {
+                (true, _) => {
+                    ui.label(title_text("No manga yet", 17.0));
                     ui.label(
-                        RichText::new("Loading the Manga UP! catalog…")
+                        RichText::new(
+                            "Search the Manga UP! catalog by title or paste a link to a manga's page.",
+                        )
+                        .color(theme::TEXT_SECONDARY),
+                    );
+                    ui.add_space(4.0);
+                    if ui.add(primary("Add your first manga")).clicked() {
+                        open_quick = true;
+                    }
+                }
+                (false, Filter::Unread) => {
+                    ui.label(title_text("You're all caught up", 17.0));
+                    ui.label(
+                        RichText::new("New chapters show up here after the next check.")
                             .color(theme::TEXT_SECONDARY),
                     );
-                });
-            }
-            Loadable::Failed(e) => {
-                ui.label(
-                    RichText::new(format!("Couldn't load the catalog: {e}")).color(theme::DANGER),
-                );
-                if ui.add(pill("Retry", false)).clicked() {
-                    self.start_catalog(&ctx);
+                    ui.add_space(4.0);
+                    if ui.add_enabled(!blocked, pill("Check now")).clicked() {
+                        check = true;
+                    }
                 }
-            }
-            Loadable::Ready(catalog) => {
-                let hits = search_catalog(catalog, &self.query, 40);
-                if self.query.trim().is_empty() {
+                (false, Filter::Issues) => {
+                    ui.label(title_text("No problems", 17.0));
                     ui.label(
-                        RichText::new(format!(
-                            "{} titles available. Start typing to search.",
-                            catalog.len()
-                        ))
-                        .color(theme::TEXT_SECONDARY),
+                        RichText::new("Every title was checked successfully.")
+                            .color(theme::TEXT_SECONDARY),
                     );
-                } else if hits.is_empty() {
-                    ui.label(RichText::new("No matching titles.").color(theme::TEXT_SECONDARY));
-                } else {
-                    ScrollArea::vertical()
-                        .id_salt("results")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (i, e) in hits.iter().enumerate() {
-                                if i > 0 {
-                                    ui.separator();
-                                }
-                                let watched =
-                                    self.is_watched(&SeriesKey::new("mangaup", e.key.clone()));
-                                ui.horizontal(|ui| {
-                                    cover(ui, e.cover.as_deref());
-                                    let text_w = (ui.available_width() - 100.0).max(120.0);
-                                    ui.allocate_ui_with_layout(
-                                        vec2(text_w, COVER.y + 8.0),
-                                        Layout::top_down(Align::Min),
-                                        |ui| {
-                                            ui.set_width(text_w);
-                                            ui.add_space(2.0);
-                                            ui.add(
-                                                egui::Label::new(RichText::new(&e.title).strong())
-                                                    .truncate(),
-                                            )
-                                            .on_hover_text(&e.title);
-                                            if let Some(u) = &e.last_updated {
-                                                ui.label(
-                                                    RichText::new(format!("Updated {u}"))
-                                                        .small()
-                                                        .color(theme::TEXT_SECONDARY),
-                                                );
-                                            }
-                                        },
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if watched {
-                                            ui.label(
-                                                RichText::new("✓ Watching").color(theme::SUCCESS),
-                                            );
-                                        } else if ui.add(primary("+ Add")).clicked() {
-                                            add = Some((e.url.clone(), e.title.clone()));
-                                        }
-                                    });
-                                });
-                            }
-                        });
+                }
+                (false, Filter::All) => {
+                    ui.label(RichText::new("Nothing to show.").color(theme::TEXT_SECONDARY));
                 }
             }
+            ui.add_space(8.0);
+        });
+        if open_quick {
+            self.quick.open(ctx);
         }
-        if let Some((url, title)) = add {
-            self.add(&ctx, &url, &title);
+        if check {
+            self.start_check(ctx, None);
         }
     }
 
-    fn link_tab(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        let mut lookup = false;
-        ui.horizontal(|ui| {
-            let edit = ui.add(
-                TextEdit::singleline(&mut self.link)
-                    .hint_text("https://global.manga-up.com/manga/261")
-                    .desired_width(ui.available_width() - 96.0)
-                    .margin(Margin::symmetric(10, 8)),
-            );
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                lookup = true;
-            }
-            let busy = matches!(self.preview, Loadable::Loading);
-            if ui
-                .add_enabled(!busy && !self.link.trim().is_empty(), primary("Look up"))
-                .clicked()
-            {
-                lookup = true;
-            }
-        });
-        if lookup && !self.link.trim().is_empty() {
-            self.preview = Loadable::Loading;
-            let link = self.link.trim().to_string();
-            tasks::spawn(&ctx, &self.tx, move || tasks::preview(link));
+    fn quick_add_overlay(&mut self, ctx: &egui::Context) {
+        if !self.quick.open {
+            return;
         }
-
-        let mut add: Option<(String, String)> = None;
-        match &self.preview {
-            Loadable::Idle => {
-                ui.label(
-                    RichText::new("Paste the link of a manga's page and press Look up.")
-                        .color(theme::TEXT_SECONDARY),
-                );
-            }
-            Loadable::Loading => {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new());
-                    ui.label(RichText::new("Reading the page…").color(theme::TEXT_SECONDARY));
-                });
-            }
-            Loadable::Failed(e) => {
-                ui.label(RichText::new(e).color(theme::DANGER));
-            }
-            Loadable::Ready(p) => {
-                let covers = self.cover_map();
-                let thumb = covers.get(&p.key.key).map(String::as_str).or_else(|| {
-                    p.snapshot
-                        .chapters_newest_first
-                        .first()
-                        .and_then(|c| c.thumbnail.as_deref())
-                });
-                let watched = self.is_watched(&p.key);
-                ui.horizontal(|ui| {
-                    cover(ui, thumb);
-                    let text_w = (ui.available_width() - 100.0).max(120.0);
-                    ui.allocate_ui_with_layout(
-                        vec2(text_w, COVER.y + 8.0),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            ui.set_width(text_w);
-                            ui.add_space(2.0);
-                            ui.add(
-                                egui::Label::new(RichText::new(&p.snapshot.title).strong())
-                                    .truncate(),
-                            )
-                            .on_hover_text(&p.snapshot.title);
-                            let n = p.snapshot.chapters_newest_first.len();
-                            let latest = p.snapshot.chapters_newest_first.first().map_or_else(
-                                String::new,
-                                |c| {
-                                    c.subtitle.as_ref().map_or_else(
-                                        || c.label.clone(),
-                                        |s| format!("{} — {s}", c.label),
-                                    )
-                                },
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {n} chapters · latest: {latest}",
-                                    p.site_name
-                                ))
-                                .small()
-                                .color(theme::TEXT_SECONDARY),
-                            );
-                        },
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if watched {
-                            ui.label(RichText::new("✓ Watching").color(theme::SUCCESS));
-                        } else if ui.add(primary("+ Add")).clicked() {
-                            add = Some((p.url.clone(), p.snapshot.title.clone()));
-                        }
+        let rows = &self.rows;
+        let watched = |k: &SeriesKey| rows.iter().any(|r| &r.key == k);
+        let env = quick_add::Env {
+            registry: &self.registry,
+            catalog: &self.catalog,
+            covers: &self.covers,
+            watched: &watched,
+            now: ctx.input(|i| i.time),
+        };
+        let actions = self.quick.show(ctx, &env);
+        for action in actions {
+            match action {
+                quick_add::Action::Close => self.quick.close(ctx, self.add_button_id),
+                quick_add::Action::Add { url, title } => {
+                    if self.add(ctx, &url, &title) {
+                        self.quick.close(ctx, self.add_button_id);
+                    }
+                }
+                quick_add::Action::RetryCatalog => self.start_catalog(ctx),
+                quick_add::Action::Lookup {
+                    generation,
+                    input,
+                    link,
+                } => {
+                    tasks::spawn(ctx, &self.tx, move || {
+                        tasks::preview(generation, input, link)
                     });
-                });
+                }
             }
-        }
-        if let Some((url, title)) = add {
-            self.add(&ctx, &url, &title);
         }
     }
 
@@ -640,30 +766,36 @@ impl WatcherApp {
         }
         ui.horizontal(|ui| {
             if let Some(s) = &self.status {
-                let color = if s.error {
-                    theme::DANGER
+                let (mark, color) = if s.error {
+                    ("✕ ", theme::DANGER)
                 } else {
-                    theme::SUCCESS
+                    ("✓ ", theme::SUCCESS)
                 };
-                ui.add(egui::Label::new(RichText::new(&s.text).small().color(color)).truncate());
-                if s.error && ui.small_button("✕").clicked() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{mark}{}", s.text))
+                            .small()
+                            .color(color),
+                    )
+                    .truncate(),
+                );
+                if s.error && ui.small_button("Dismiss").clicked() {
                     self.status = None;
                 }
             } else {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(format!("Settings: {}", self.config_path.display()))
+                        RichText::new(format!("Settings: {}", self.paths.config.display()))
                             .small()
                             .color(theme::TEXT_SECONDARY),
                     )
                     .truncate(),
                 )
-                .on_hover_text(self.config_path.display().to_string());
+                .on_hover_text(self.paths.config.display().to_string());
             }
         });
         if self.status.as_ref().is_some_and(|s| !s.error) {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs(1));
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
     }
 }
@@ -671,8 +803,16 @@ impl WatcherApp {
 impl eframe::App for WatcherApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
         self.poll_messages(&ctx);
         self.guard_close(&ctx);
+        self.fit_to_monitor(&ctx);
+        self.poll_files(now);
+        self.refresh_task(&ctx, now);
+
+        if self.settings.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+            self.quick.open(&ctx);
+        }
 
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         Frame::NONE
@@ -701,8 +841,11 @@ impl eframe::App for WatcherApp {
                     [footer_rect.left_top(), footer_rect.right_top()],
                     Stroke::new(1.0, theme::SEPARATOR),
                 );
+                let modal = self.quick.open;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
-                    self.body(ui);
+                    // While Quick Add is open the shelf behind it is inert, which also keeps
+                    // keyboard focus inside the panel.
+                    ui.add_enabled_ui(!modal, |ui| self.body(ui));
                 });
                 ui.scope_builder(
                     egui::UiBuilder::new()
@@ -712,6 +855,11 @@ impl eframe::App for WatcherApp {
                 );
                 ui.allocate_rect(rest, egui::Sense::hover());
             });
+
+        self.quick_add_overlay(&ctx);
+        chrome::paint_focus_ring(&ctx);
+        // Keep relative times, scheduled-task results and progress fresh while idle.
+        ctx.request_repaint_after(Duration::from_secs(2));
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -720,6 +868,15 @@ impl eframe::App for WatcherApp {
 }
 
 // -------------------------------------------------------------------- helpers
+
+fn tone_line(ui: &mut Ui, text: &str, tone: Tone) {
+    let (mark, color) = match tone {
+        Tone::Good => ("✓ ", theme::SUCCESS),
+        Tone::Warn => ("⚠ ", theme::WARNING),
+        Tone::Neutral => ("", theme::TEXT_SECONDARY),
+    };
+    ui.add(egui::Label::new(RichText::new(format!("{mark}{text}")).small().color(color)).wrap());
+}
 
 fn forget_state(key: &SeriesKey) {
     let Ok(path) = resolve_state_path(None) else {
@@ -743,111 +900,4 @@ fn time_now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
-}
-
-fn ago(secs: i64) -> String {
-    match secs {
-        s if s < 90 => "just now".into(),
-        s if s < 90 * 60 => format!("{} min ago", s / 60),
-        s if s < 36 * 3600 => format!("{} h ago", s / 3600),
-        s => format!("{} days ago", s / 86400),
-    }
-}
-
-fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    Frame::NONE
-        .fill(theme::SURFACE)
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(Margin::same(12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui)
-        })
-        .inner
-}
-
-fn banner(ui: &mut Ui, text: &str) {
-    Frame::NONE
-        .fill(theme::WARNING.gamma_multiply(0.15))
-        .stroke(Stroke::new(1.0, theme::WARNING.gamma_multiply(0.6)))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(format!("⚠  {text}")).color(theme::WARNING));
-        });
-    ui.add_space(8.0);
-}
-
-fn cover(ui: &mut Ui, url: Option<&str>) {
-    if let Some(u) = url {
-        ui.add(Image::new(u).fit_to_exact_size(COVER).corner_radius(6));
-    } else {
-        let (r, _) = ui.allocate_exact_size(COVER, egui::Sense::hover());
-        ui.painter().rect_filled(r, 6, theme::SURFACE_HOVER);
-        ui.painter().text(
-            r.center(),
-            egui::Align2::CENTER_CENTER,
-            "📖",
-            egui::FontId::proportional(16.0),
-            theme::TEXT_SECONDARY,
-        );
-    }
-}
-
-fn pill(text: &str, danger: bool) -> Button<'static> {
-    let (fg, bg) = if danger {
-        (Color32::WHITE, theme::DANGER)
-    } else {
-        (theme::TEXT, theme::SURFACE_HOVER)
-    };
-    Button::new(RichText::new(text.to_owned()).color(fg))
-        .fill(bg)
-        .corner_radius(CornerRadius::same(14))
-}
-
-fn primary(text: &str) -> Button<'static> {
-    Button::new(
-        RichText::new(text.to_owned())
-            .color(Color32::WHITE)
-            .strong(),
-    )
-    .fill(theme::ACCENT)
-    .corner_radius(CornerRadius::same(14))
-    .min_size(vec2(72.0, 28.0))
-}
-
-fn segmented(ui: &mut Ui, tab: &mut Tab) {
-    Frame::NONE
-        .fill(theme::SURFACE)
-        .corner_radius(CornerRadius::same(9))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            // right_to_left parent: add in reverse visual order
-            for (t, label) in [(Tab::Link, "Paste a link"), (Tab::Search, "Search by name")] {
-                let selected = *tab == t;
-                let b = Button::new(RichText::new(label).color(if selected {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_SECONDARY
-                }))
-                .fill(if selected {
-                    theme::SURFACE_HOVER
-                } else {
-                    Color32::TRANSPARENT
-                })
-                .stroke(Stroke::NONE)
-                .corner_radius(CornerRadius::same(7));
-                if ui.add(b).clicked() {
-                    *tab = t;
-                }
-            }
-        });
-}
-
-#[allow(dead_code)]
-fn _assert_send() {
-    fn is_send<T: Send>() {}
-    is_send::<config_edit::ListedSeries>();
 }

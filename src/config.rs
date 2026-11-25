@@ -44,6 +44,16 @@ pub const DEFAULT_WEBHOOK_ENV: &str = "BESIDEME_WEBHOOK";
 /// Environment variable name for health alert webhooks.
 pub const HEALTH_WEBHOOK_ENV: &str = "BESIDEME_HEALTH_WEBHOOK";
 
+/// Environment variable that lifts the Discord host check for webhook URLs (and allows loopback
+/// `http`), exactly like the CLI's `--allow-any-webhook`. For local fixtures only.
+pub const ALLOW_ANY_WEBHOOK_ENV: &str = "BESIDEME_ALLOW_ANY_WEBHOOK";
+
+/// Whether [`ALLOW_ANY_WEBHOOK_ENV`] is set to `1`.
+#[must_use]
+pub fn allow_any_webhook_from_env() -> bool {
+    std::env::var(ALLOW_ANY_WEBHOOK_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
 pub(crate) const LEGACY_UPDATES_ENV: &str = "MANGA_WATCHER_WEBHOOK";
 pub(crate) const LEGACY_HEALTH_ENV: &str = "MANGA_WATCHER_HEALTH_WEBHOOK";
 

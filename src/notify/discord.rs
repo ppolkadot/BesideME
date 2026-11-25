@@ -613,6 +613,20 @@ impl DiscordClient {
         thread_id: Option<&str>,
         payload: &DiscordPayload,
     ) -> Result<(), DiscordError> {
+        self.send_with_retry_cap(webhook, thread_id, payload, MAX_RETRY_AFTER_SECS)
+            .await
+    }
+
+    /// Like [`DiscordClient::send`], but a `429` is only retried when Discord asks for at most
+    /// `max_retry_wait_secs`. An interactive test passes `0.0` so it reports the rate limit at
+    /// once instead of making the user wait.
+    pub async fn send_with_retry_cap(
+        &self,
+        webhook: &WebhookUrl,
+        thread_id: Option<&str>,
+        payload: &DiscordPayload,
+        max_retry_wait_secs: f64,
+    ) -> Result<(), DiscordError> {
         let target_url = build_execution_url(webhook.expose_url(), thread_id);
 
         for attempt in 0..2 {
@@ -654,7 +668,7 @@ impl DiscordClient {
                     .and_then(|b| b.retry_after);
                 let retry_after_secs = body_retry.or(header_retry).unwrap_or(61.0).max(0.0);
 
-                if attempt == 0 && retry_after_secs <= MAX_RETRY_AFTER_SECS {
+                if attempt == 0 && retry_after_secs <= max_retry_wait_secs {
                     tracing::warn!(
                         retry_after_secs,
                         "Discord webhook rate-limited (429); waiting and retrying once"

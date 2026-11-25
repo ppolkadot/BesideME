@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use besideme::config::{Config, LoadOptions};
+use besideme::config::{Config, LoadOptions, allow_any_webhook_from_env};
 use besideme::paths::{resolve_log_dir, resolve_state_path};
 use besideme::sites::Registry;
 use besideme::watcher::{
@@ -213,7 +213,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             let load_opts = LoadOptions {
                 config_path: args.config,
                 env_file_path: cli.env_file,
-                allow_any_webhook: cli.allow_any_webhook,
+                allow_any_webhook: cli.allow_any_webhook || allow_any_webhook_from_env(),
                 allow_missing_webhooks: args.dry_run,
             };
             let config = match Config::load(&load_opts, &registry) {
@@ -247,7 +247,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             let load_opts = LoadOptions {
                 config_path: args.config,
                 env_file_path: cli.env_file,
-                allow_any_webhook: cli.allow_any_webhook,
+                allow_any_webhook: cli.allow_any_webhook || allow_any_webhook_from_env(),
                 allow_missing_webhooks: false,
             };
             let config = match Config::load(&load_opts, &registry) {
@@ -270,7 +270,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             let load_opts = LoadOptions {
                 config_path: args.config,
                 env_file_path: cli.env_file,
-                allow_any_webhook: cli.allow_any_webhook,
+                allow_any_webhook: cli.allow_any_webhook || allow_any_webhook_from_env(),
                 allow_missing_webhooks: args.health,
             };
             let config = match Config::load(&load_opts, &registry) {
@@ -286,7 +286,7 @@ async fn dispatch(cli: Cli) -> ExitCode {
             let load_opts = LoadOptions {
                 config_path: args.config,
                 env_file_path: cli.env_file,
-                allow_any_webhook: cli.allow_any_webhook,
+                allow_any_webhook: cli.allow_any_webhook || allow_any_webhook_from_env(),
                 allow_missing_webhooks: true,
             };
             let config = match Config::load(&load_opts, &registry) {
