@@ -4,7 +4,7 @@
 interval_minutes = 30          # how often to check (minimum 10)
 jitter_seconds = 120           # random +/- seconds so checks don't run in lockstep
 timeout_seconds = 20
-user_agent = "BesideME/0.1 (+personal use)"
+# user_agent = "BesideME/0.2.0 (+personal use)"  # optional override
 require_published = false      # true = skip early-access chapters until they get a release date
 max_messages_per_cycle = 3     # max chapter messages per manga per check
 alert_after_failures = 6       # health alert after N failed checks in a row; 0 = off

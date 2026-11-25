@@ -27,7 +27,8 @@ pub const DEFAULT_JITTER_SECONDS: u64 = 120;
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 20;
 
 /// Default descriptive User-Agent header value.
-pub const DEFAULT_USER_AGENT: &str = "BesideME/0.1 (+personal use)";
+pub const DEFAULT_USER_AGENT: &str =
+    concat!("BesideME/", env!("CARGO_PKG_VERSION"), " (+personal use)");
 
 /// Default maximum chapter-group messages sent per series per cycle.
 pub const DEFAULT_MAX_MESSAGES_PER_CYCLE: usize = 3;

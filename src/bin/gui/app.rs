@@ -151,6 +151,8 @@ impl WatcherApp {
     // ---------------------------------------------------------------- data
 
     fn reload(&mut self) {
+        // A write during the reload must still look new on the next poll.
+        self.stamps = FileStamps::read(&self.paths.config, &self.paths.state, &self.paths.reads);
         let snapshot = data::load(
             &self.registry,
             &self.paths,
@@ -160,7 +162,6 @@ impl WatcherApp {
         self.rows = snapshot.rows;
         self.last_run = snapshot.last_run;
         self.config_error = snapshot.config_error;
-        self.stamps = FileStamps::read(&self.paths.config, &self.paths.state, &self.paths.reads);
         self.webhook_missing = !WebhookSettings::load(&self.paths.config)
             .is_ok_and(|settings| settings.updates_configured());
         if let Some(error) = self.config_error.clone() {
@@ -268,11 +269,7 @@ impl WatcherApp {
         });
         match result {
             Ok(()) => {
-                forget_state(key);
-                let state_key = key.as_state_key();
-                let _ = ReadMarkers::update(&self.paths.reads, |m| {
-                    m.forget(&state_key);
-                });
+                forget_history(key, &self.paths.state, &self.paths.reads);
                 self.reload();
                 self.set_status(Some(ctx), format!("Stopped watching {title}."), false);
             }
@@ -878,26 +875,68 @@ fn tone_line(ui: &mut Ui, text: &str, tone: Tone) {
     ui.add(egui::Label::new(RichText::new(format!("{mark}{text}")).small().color(color)).wrap());
 }
 
-fn forget_state(key: &SeriesKey) {
-    let Ok(path) = resolve_state_path(None) else {
+fn forget_history(key: &SeriesKey, state_path: &std::path::Path, reads_path: &std::path::Path) {
+    // Retain both histories when the checker owns the lock.
+    let Ok(_lock) = InstanceLock::acquire_for_state(state_path) else {
         return;
     };
-    if !path.exists() {
-        return;
-    }
-    // If a background check holds the lock, leave state alone; it is harmless.
-    let Ok(_lock) = InstanceLock::acquire_for_state(&path) else {
+    let Ok(mut state) = StateFile::load(state_path) else {
         return;
     };
-    if let Ok(mut st) = StateFile::load(&path)
-        && st.series.remove(&key.as_state_key()).is_some()
-    {
-        let _ = st.save_atomic(&path);
+    let state_key = key.as_state_key();
+    if state.series.remove(&state_key).is_some() && state.save_atomic(state_path).is_err() {
+        return;
     }
+    let _ = ReadMarkers::update(reads_path, |markers| {
+        markers.forget(&state_key);
+    });
 }
 
 fn time_now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removing_during_check_preserves_both_series_histories() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let reads_path = dir.path().join("reads.json");
+        let key = SeriesKey {
+            site_id: "mangaup".into(),
+            key: "1".into(),
+        };
+        let state_key = key.as_state_key();
+        let mut state = StateFile::default();
+        state
+            .series
+            .insert(state_key.clone(), besideme::state::SeriesState::default());
+        state.save_atomic(&state_path).unwrap();
+        ReadMarkers::update(&reads_path, |markers| markers.mark_read(&state_key, ["2"])).unwrap();
+
+        let lock = InstanceLock::acquire_for_state(&state_path).unwrap();
+        forget_history(&key, &state_path, &reads_path);
+        assert!(
+            StateFile::load(&state_path)
+                .unwrap()
+                .series
+                .contains_key(&state_key)
+        );
+        assert!(ReadMarkers::load(&reads_path).is_read(&state_key, "2"));
+        drop(lock);
+
+        forget_history(&key, &state_path, &reads_path);
+        assert!(
+            !StateFile::load(&state_path)
+                .unwrap()
+                .series
+                .contains_key(&state_key)
+        );
+        assert!(!ReadMarkers::load(&reads_path).is_read(&state_key, "2"));
+    }
 }

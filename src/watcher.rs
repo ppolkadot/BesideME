@@ -37,7 +37,7 @@ pub const RETRY_COOLDOWN_SECS: i64 = 30;
 pub const BLOCKED_RETRY_SECS: i64 = 300;
 
 /// Maximum backoff cap for consecutive 403/429 blocks (6 hours, §7).
-pub const MAX_BLOCK_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+pub const MAX_BLOCK_BACKOFF: Duration = Duration::from_hours(6);
 
 /// Exit codes returned by `besideme-cli`, ordered by severity ("worst wins", §6).
 ///

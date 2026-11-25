@@ -3,5 +3,9 @@
 .env.*
 !.env.example
 state.json
+state.lock
+reads.json
+reads.json.bad
+reads.lock
 *.log
 /dist

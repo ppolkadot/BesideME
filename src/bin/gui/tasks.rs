@@ -199,6 +199,9 @@ async fn run_check_job(
             }
         }
     }
+    if ok && !matches!(summary.exit_code, ExitCode::Ok | ExitCode::NewsAnnounced) {
+        return fail("Couldn't finish the check. See the log for details.".into());
+    }
     if parts.is_empty() {
         parts.push("Checked — no new chapters.".into());
     }

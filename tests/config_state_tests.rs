@@ -468,3 +468,28 @@ fn single_instance_lock_prevents_second_acquisition() {
     let _lock2 =
         InstanceLock::acquire_for_state(&state_path).expect("lock succeeds after first dropped");
 }
+
+#[test]
+fn isolated_profile_does_not_load_working_directory_dotenv() {
+    let profile = TempDir::new().unwrap();
+    let cwd = TempDir::new().unwrap();
+    fs::write(profile.path().join("config.toml"), "").unwrap();
+    fs::write(
+        cwd.path().join(".env"),
+        "BESIDEME_HEALTH_WEBHOOK=invalid-dummy-value",
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_besideme-cli"))
+        .args(["check", "--dry-run"])
+        .current_dir(cwd.path())
+        .env("BESIDEME_PROFILE_DIR", profile.path())
+        .env_remove(HEALTH_WEBHOOK_ENV)
+        .env_remove("MANGA_WATCHER_HEALTH_WEBHOOK")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

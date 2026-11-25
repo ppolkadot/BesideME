@@ -63,12 +63,10 @@ pub enum DiscordError {
     },
 
     /// Webhook returned another `4xx` client error (e.g. `400 Bad Request`).
-    #[error("Discord rejected webhook payload with HTTP {status}: {body}")]
+    #[error("Discord rejected webhook payload with HTTP {status}")]
     WebhookRejected {
         /// HTTP status code.
         status: u16,
-        /// Truncated response body from Discord.
-        body: String,
     },
 
     /// Webhook returned `429 Too Many Requests` and either exceeded 60 s or failed again on retry.
@@ -680,16 +678,10 @@ impl DiscordClient {
             }
 
             if status.is_client_error() {
-                let body_text = response.text().await.unwrap_or_default();
-                let truncated = truncate_chars(&strip_control_chars(&body_text), 300);
-                tracing::error!(
-                    status = status.as_u16(),
-                    body = %truncated,
-                    "Discord rejected webhook payload"
-                );
+                // A response may echo the credential or private payload.
+                tracing::error!(status = status.as_u16(), "Discord rejected webhook payload");
                 return Err(DiscordError::WebhookRejected {
                     status: status.as_u16(),
-                    body: truncated,
                 });
             }
 

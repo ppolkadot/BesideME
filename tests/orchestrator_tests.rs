@@ -408,7 +408,7 @@ async fn orchestrator_dry_run_never_creates_state_and_held_lock_returns_exit_5()
 
 #[test]
 fn backoff_schedule_and_exit_code_priority_follow_spec() {
-    let base = Duration::from_secs(30 * 60);
+    let base = Duration::from_mins(30);
 
     // Transient network: 30s, 90s, 270s, then normal interval
     assert_eq!(
@@ -449,7 +449,7 @@ fn backoff_schedule_and_exit_code_priority_follow_spec() {
                 retry_after: None,
             })
         ),
-        Duration::from_secs(60 * 60)
+        Duration::from_hours(1)
     );
     assert_eq!(
         compute_next_delay(
@@ -460,7 +460,7 @@ fn backoff_schedule_and_exit_code_priority_follow_spec() {
                 retry_after: None,
             })
         ),
-        Duration::from_secs(6 * 60 * 60)
+        Duration::from_hours(6)
     );
 
     // Exit code priority: 1 > 5 > 4 > 2 > 3 > 10 > 0

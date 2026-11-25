@@ -199,7 +199,7 @@ async fn deliver(
     match client.send_with_retry_cap(url, None, &payload, 0.0).await {
         Ok(()) => TestOutcome::Delivered,
         Err(DiscordError::WebhookGone { status }) => TestOutcome::Revoked { status },
-        Err(DiscordError::WebhookRejected { status, .. }) => TestOutcome::Rejected { status },
+        Err(DiscordError::WebhookRejected { status }) => TestOutcome::Rejected { status },
         Err(DiscordError::RateLimited { retry_after_secs }) => TestOutcome::RateLimited {
             // Rounded up so the user never retries a moment too early.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

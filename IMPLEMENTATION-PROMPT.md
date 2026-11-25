@@ -1,7 +1,9 @@
-# BesideME Implementation Prompt
+# Original BesideME implementation prompt
 
-This document describes the original chapter-checking architecture. See [README.md](README.md)
-for the current desktop setup and [the redesign proposal](docs/redesign-plan.md) for the next release.
+This archived specification records the first chapter checker. Commands, platform assumptions,
+version requirements, and unfinished tasks below describe that implementation period. See the
+[README](README.md), [configuration guide](docs/configuration.md),
+[developer guide](docs/development.md), and [redesign record](docs/redesign-plan.md) for current usage.
 
 ## 0. What you are building
 

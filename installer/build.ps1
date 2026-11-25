@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    cargo build --release --bins
+    cargo build --locked --release --bins
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
     $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |

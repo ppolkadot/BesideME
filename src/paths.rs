@@ -148,10 +148,17 @@ pub fn resolve_config_path_with_exe_dir(
 /// 3. `./.env`
 ///
 /// A missing `.env` is allowed when not explicitly passed via `--env-file`.
+/// A profile override replaces the implicit file search with `<profile>/.env`.
 pub fn resolve_env_file_path(
     explicit: Option<&Path>,
     resolved_config_path: &Path,
 ) -> Result<Option<PathBuf>, PathError> {
+    if explicit.is_none()
+        && let Some(profile) = profile_dir_override()
+    {
+        let candidate = profile.join(".env");
+        return Ok(candidate.is_file().then_some(candidate));
+    }
     resolve_env_file_path_with_cwd(explicit, resolved_config_path, Path::new("."))
 }
 

@@ -8,7 +8,7 @@
 ; (windowless, so nothing flashes on screen).
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #error AppVersion must be supplied by installer/build.ps1
 #endif
 #define AppName "BesideME"
 #define AppExe "BesideME.exe"
@@ -18,6 +18,7 @@
 AppId={{6F0C2B7E-4D51-4E8A-9B3C-2A7D9E1F5C40}
 AppName={#AppName}
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppName}
 DefaultDirName={localappdata}\Programs\{#AppName}
@@ -52,6 +53,10 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\besideme-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\.env.example"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\yamada-256.png"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "..\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\fonts\OFL.txt"; DestDir: "{app}"; DestName: "Poppins-OFL.txt"; Flags: ignoreversion
 ; Fresh settings file; never overwrite the user's list of manga on upgrade.

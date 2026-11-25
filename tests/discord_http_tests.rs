@@ -257,26 +257,20 @@ async fn discord_client_retries_short_429_and_aborts_long_429_and_classifies_4xx
     let err = client.send(&wh_404, None, &payload).await.unwrap_err();
     assert!(matches!(err, DiscordError::WebhookGone { status: 404 }));
 
-    // 4. 400 -> WebhookRejected
-    let wh_400 = WebhookUrl::parse(
-        "BESIDEME_WEBHOOK",
-        &format!("{}/api/webhooks/444444/token_400", server.uri()),
-        true,
-    )
-    .unwrap();
+    // A rejected destination can echo its own credential in a response.
+    let raw_400 = format!("{}/api/webhooks/444444/token_400", server.uri());
+    let wh_400 = WebhookUrl::parse("BESIDEME_WEBHOOK", &raw_400, true).unwrap();
 
     Mock::given(method("POST"))
         .and(path("/api/webhooks/444444/token_400"))
-        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"embeds": ["too many"]}"#))
+        .respond_with(ResponseTemplate::new(400).set_body_string(format!("Rejected {raw_400}")))
         .expect(1)
         .mount(&server)
         .await;
 
     let err = client.send(&wh_400, None, &payload).await.unwrap_err();
-    assert!(matches!(
-        err,
-        DiscordError::WebhookRejected { status: 400, .. }
-    ));
+    assert!(matches!(err, DiscordError::WebhookRejected { status: 400 }));
+    assert!(!format!("{err} {err:?}").contains("token_400"));
 }
 
 #[tokio::test]

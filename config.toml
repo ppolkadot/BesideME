@@ -3,7 +3,7 @@
 interval_minutes = 30          # minimum 10 (clamped, with a warning)
 jitter_seconds = 120           # uniform random in [-jitter, +jitter]
 timeout_seconds = 20
-user_agent = "BesideME/0.1 (+personal use)"
+# user_agent = "BesideME/0.2.0 (+personal use)"  # optional override
 require_published = false      # announce early-access (undated) chapters too
 max_messages_per_cycle = 3     # max chapter-group messages per series per cycle
 alert_after_failures = 6       # health alert after N consecutive failures; 0 = off
