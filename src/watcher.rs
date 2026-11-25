@@ -8,8 +8,10 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::config::{Config, SeriesConfig, WebhookUrl};
-use crate::detect::ChapterGroup;
-use crate::detect::{Decision, Policy, REBASELINE_AFTER_CONSECUTIVE_ANOMALIES, decide};
+use crate::detect::{
+    ChapterGroup, Decision, Policy, REBASELINE_AFTER_CONSECUTIVE_ANOMALIES, decide,
+    group_chapters_oldest_first,
+};
 use crate::http::{FetchOutcome, HttpError, SiteHttpClient};
 use crate::model::{ChapterRef, SeriesKey, SeriesSnapshot};
 use crate::notify::discord::{
@@ -339,14 +341,8 @@ pub async fn run_check_scoped(
 
     // Persist a run summary for full, real runs so other processes can show progress and result.
     let record_run = !options.dry_run && only.is_none();
-    let previous_success = state.last_run.as_ref().and_then(|r| r.last_success_unix);
     if record_run {
-        state.last_run = Some(RunRecord {
-            started_unix: unix_now(),
-            last_success_unix: previous_success,
-            ..RunRecord::default()
-        });
-        let _ = persist_state_if_needed(&state, state_path, false);
+        begin_run(&mut state, state_path);
     }
 
     let total = selected.len();
@@ -393,26 +389,49 @@ pub async fn run_check_scoped(
     }
 
     if record_run {
-        let failed = reports.iter().filter(|r| r.error.is_some()).count();
-        let finished = unix_now();
-        let announced_groups = reports.iter().map(|r| r.announced_groups).sum();
-        if let Some(run) = state.last_run.as_mut() {
-            run.finished_unix = Some(finished);
-            run.exit_code = Some(overall_code.as_i32());
-            run.ok = reports.len() - failed;
-            run.failed = failed;
-            run.announced_groups = announced_groups;
-            if failed == 0 {
-                run.last_success_unix = Some(finished);
-            }
-        }
-        overall_code = overall_code.combine(persist_state_if_needed(&state, state_path, false));
+        overall_code =
+            overall_code.combine(finish_run(&mut state, state_path, &reports, overall_code));
     }
 
     CheckRunSummary {
         exit_code: overall_code,
         reports,
     }
+}
+
+fn begin_run(state: &mut StateFile, state_path: &Path) {
+    state.last_run = Some(RunRecord {
+        started_unix: unix_now(),
+        last_success_unix: state
+            .last_run
+            .as_ref()
+            .and_then(|run| run.last_success_unix),
+        ..RunRecord::default()
+    });
+    let _ = persist_state_if_needed(state, state_path, false);
+}
+
+fn finish_run(
+    state: &mut StateFile,
+    state_path: &Path,
+    reports: &[SeriesCheckReport],
+    exit_code: ExitCode,
+) -> ExitCode {
+    if let Some(run) = state.last_run.as_mut() {
+        let finished = unix_now();
+        run.finished_unix = Some(finished);
+        run.exit_code = Some(exit_code.as_i32());
+        run.failed = reports
+            .iter()
+            .filter(|report| report.error.is_some())
+            .count();
+        run.ok = reports.len() - run.failed;
+        run.announced_groups = reports.iter().map(|report| report.announced_groups).sum();
+        if run.failed == 0 && matches!(exit_code, ExitCode::Ok | ExitCode::NewsAnnounced) {
+            run.last_success_unix = Some(finished);
+        }
+    }
+    persist_state_if_needed(state, state_path, false)
 }
 
 struct SingleSeriesOutcome {
@@ -990,8 +1009,18 @@ async fn apply_decision(
             // its group is delivered, so a failed first announcement is not shown as unread.
             let initialized = !was_uninitialized;
             if initialized {
-                let releases = groups
+                let folded_ids: HashSet<&str> = folded.iter().map(String::as_str).collect();
+                let folded_parts = snapshot
+                    .chapters_newest_first
                     .iter()
+                    .rev()
+                    .filter(|chapter| folded_ids.contains(chapter.id.as_str()))
+                    .cloned()
+                    .collect();
+                let folded_groups = group_chapters_oldest_first(folded_parts);
+                let releases = folded_groups
+                    .iter()
+                    .chain(&groups)
                     .filter_map(|g| release_from_group(site, series_cfg, g, now_unix));
                 let entry = state.series.entry(state_key.clone()).or_default();
                 if entry.record_discovered(releases) {
@@ -1516,14 +1545,17 @@ pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) 
 
     loop {
         let check_now = SystemTime::now();
-        let mut ran_any_in_pass = false;
+        let mut reports = Vec::new();
+        let mut overall_code = ExitCode::Ok;
 
         for (idx, series_cfg) in config.series.iter().enumerate() {
             if SystemTime::now() < next_due[idx] {
                 continue;
             }
 
-            if ran_any_in_pass {
+            if reports.is_empty() {
+                begin_run(&mut state, state_path);
+            } else {
                 // Enforce >= 2s gap between requests while listening for shutdown signal.
                 tokio::select! {
                     () = shutdown_signal() => {
@@ -1557,7 +1589,8 @@ pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) 
                 out = check_fut => out,
             };
 
-            ran_any_in_pass = true;
+            overall_code = overall_code.combine(outcome.exit_code);
+            reports.push(outcome.report);
             let delay = compute_next_delay(
                 series_cfg.interval,
                 config.jitter_seconds,
@@ -1570,6 +1603,10 @@ pub async fn run_watch(config: &Config, registry: &Registry, state_path: &Path) 
                 next_poll_in_secs = delay.as_secs(),
                 "scheduled next poll for series"
             );
+        }
+
+        if !reports.is_empty() {
+            let _ = finish_run(&mut state, state_path, &reports, overall_code);
         }
 
         // Sleep min(time until earliest next_due, 60s) and re-check the wall clock (§7).

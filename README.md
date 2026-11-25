@@ -254,7 +254,7 @@ besideme-cli reset        (<series-url> | --all) [--state P]
 Global flags: -v / -q, --allow-any-webhook, --env-file P
 ```
 
-- **State file location**: `--state <path>`, defaulting to `%LOCALAPPDATA%\BesideME\state.json` on Windows (`~/.local/share/BesideME/state.json` on Linux). `besideme-cli check` records the same discovered releases, per-title results, and run summary as the desktop app's scheduled check (`watch` records discoveries and per-title results, but no run summary). Exit codes, flags, and JSON output are unchanged.
+- **State file location**: `--state <path>`, defaulting to `%LOCALAPPDATA%\BesideME\state.json` on Windows (`~/.local/share/BesideME/state.json` on Linux). `besideme-cli check` records the same discovered releases, per-title results, and run summary as the desktop app's scheduled check (`watch` also records a summary for each completed pass over its due titles). Exit codes, flags, and JSON output are unchanged.
 - **Log files**: Daily rotated logs (retaining 7 files) are written to `%LOCALAPPDATA%\BesideME\logs\` alongside `stderr`.
 
 ### Exit Codes

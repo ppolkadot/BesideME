@@ -154,7 +154,7 @@ pub struct DiscoveredRelease {
     pub discovered_unix: i64,
 }
 
-/// Persisted summary of the last full check run.
+/// Persisted summary of the last full check or pass over due titles in watch mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
     /// Unix timestamp when the run started.

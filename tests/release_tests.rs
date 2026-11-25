@@ -23,7 +23,7 @@ use besideme::state::{
 };
 use besideme::watcher::{
     CheckOptions, CheckProgress, ExitCode, RETRY_COOLDOWN_SECS, retry_wait_secs, run_check,
-    run_check_scoped,
+    run_check_scoped, run_watch,
 };
 
 const KEY: &str = "mangaup:261";
@@ -883,4 +883,77 @@ async fn single_title_retry_delivers_through_the_same_rules() {
     assert_eq!(fx.webhook.received_requests().await.unwrap().len(), 1);
     assert_eq!(fx.state().series[KEY].discovered.len(), 1);
     tokio::time::sleep(Duration::from_millis(1)).await;
+}
+
+#[tokio::test]
+async fn announcement_cap_does_not_hide_discovered_releases() {
+    let mut fx = Fixture::new(&[261]).await;
+    fx.config.max_messages_per_cycle = 1;
+    webhook_ok(&fx.webhook).await;
+    serve_page(&fx.site, 261, page(&[(1, "Chapter 1")])).await;
+    assert_eq!(fx.check().await.exit_code, ExitCode::Ok);
+
+    serve_page(
+        &fx.site,
+        261,
+        page(&[
+            (5, "Chapter 4"),
+            (4, "Chapter 3.2"),
+            (3, "Chapter 3.1"),
+            (2, "Chapter 2"),
+            (1, "Chapter 1"),
+        ]),
+    )
+    .await;
+    let summary = fx.check().await;
+    assert_eq!(summary.exit_code, ExitCode::NewsAnnounced);
+    assert_eq!(summary.reports[0].announced_groups, 1);
+    assert_eq!(summary.reports[0].folded_parts, 3);
+    let state = fx.state();
+    let groups = state.series[KEY]
+        .discovered
+        .iter()
+        .map(|release| {
+            release
+                .part_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(groups, [vec!["2"], vec!["3", "4"], vec!["5"]]);
+    assert_eq!(fx.check().await.exit_code, ExitCode::Ok);
+    assert_eq!(
+        fx.state().series[KEY].discovered,
+        state.series[KEY].discovered
+    );
+}
+
+#[tokio::test]
+async fn watch_persists_summary_when_a_pass_finishes() {
+    let fx = Fixture::new(&[261]).await;
+    serve_page(&fx.site, 261, page(&[(1, "Chapter 1")])).await;
+    let path = fx.state_path();
+    let wait_for_summary = async {
+        loop {
+            if let Some(record) = fx.state().last_run
+                && record.finished_unix.is_some()
+            {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    let record = tokio::select! {
+        result = run_watch(&fx.config, &fx.registry, &path) => {
+            panic!("watch exited before producing a summary: {result:?}");
+        }
+        record = tokio::time::timeout(Duration::from_secs(3), wait_for_summary) => {
+            record.expect("watch should persist a finished run summary")
+        }
+    };
+    assert_eq!(record.ok, 1);
+    assert_eq!(record.failed, 0);
+    assert_eq!(record.exit_code, Some(ExitCode::Ok.as_i32()));
+    assert_eq!(record.last_success_unix, record.finished_unix);
 }
